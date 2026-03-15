@@ -21,8 +21,14 @@ class ExchangeClient:
             params["password"] = cfg.passphrase
 
         self.exchange = ccxt.bitget(params)
+
+        # Activate demo/sandbox mode if configured
+        if cfg.demo and cfg.api_key:
+            self.exchange.set_sandbox_mode(True)
+
         self._has_auth = bool(cfg.api_key)
-        logger.info(f"Exchange initialized (auth={'yes' if self._has_auth else 'no (public data only)'})")
+        mode = "demo" if cfg.demo else ("auth" if self._has_auth else "public only")
+        logger.info(f"Exchange initialized (mode={mode})")
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> pd.DataFrame:
         """Fetch OHLCV candles as DataFrame. Works without auth."""

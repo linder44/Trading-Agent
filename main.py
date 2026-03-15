@@ -3,7 +3,7 @@ Autonomous AI Trading Agent
 Main entry point and orchestration loop.
 
 Usage:
-    python main.py              # Run in paper mode (default, safe)
+    python main.py              # Run in demo mode (default, Bitget demo account)
     python main.py --live       # Switch to live trading (real money!)
     python main.py --once       # Run analysis once and exit
 """
@@ -36,14 +36,16 @@ logger.add("logs/trading_{time:YYYY-MM-DD}.log", rotation="1 day", retention="30
 class TradingAgent:
     """Main orchestrator that ties everything together."""
 
-    def __init__(self, mode: str = "paper"):
-        self.mode = mode  # "paper" or "live"
+    def __init__(self, mode: str = "demo"):
+        self.mode = mode  # "paper", "demo", or "live"
 
         logger.info("=" * 60)
         logger.info("  AUTONOMOUS AI TRADING AGENT")
         logger.info(f"  Mode: {self.mode.upper()}")
         if self.mode == "paper":
             logger.info(f"  Paper Balance: {config.paper.initial_balance} USDT")
+        elif self.mode == "demo":
+            logger.info("  Bitget DEMO account (virtual money)")
         logger.info(f"  Symbols: {config.trading.symbols}")
         logger.info(f"  Interval: {config.trading.analysis_interval_minutes} min")
         logger.info("=" * 60)
@@ -76,8 +78,8 @@ class TradingAgent:
             self.risk.reset_daily_stats()
             self._last_daily_reset = today
 
-        # Sync positions from exchange (only in live mode)
-        if self.mode == "live":
+        # Sync positions from exchange (demo and live mode)
+        if self.mode in ("demo", "live"):
             self.orders.sync_positions_from_exchange()
 
         # 1. Gather technical analysis for all symbols
@@ -99,7 +101,7 @@ class TradingAgent:
         market_context = self.news.get_market_context()
 
         # 3. Get portfolio state
-        if self.mode == "live":
+        if self.mode in ("demo", "live"):
             balance = self.exchange.fetch_usdt_balance()
         else:
             balance = self.paper_balance
@@ -142,6 +144,7 @@ class TradingAgent:
         if self.mode == "paper":
             self._execute_paper(decision, balance)
         else:
+            # demo and live both send real orders (demo goes to Bitget demo exchange)
             self._execute_live(decision, balance)
 
     def _execute_paper(self, decision: dict, balance: float):

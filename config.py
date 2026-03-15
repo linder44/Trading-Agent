@@ -7,14 +7,16 @@ from pydantic import BaseModel
 load_dotenv()
 
 # paper = только анализ и логирование, без реальных ордеров
-# live = реальная торговля
-TRADING_MODE: str = os.getenv("TRADING_MODE", "paper")
+# demo = демо-счёт Bitget (виртуальные деньги, реальные ордера на демо)
+# live = реальная торговля (настоящие деньги!)
+TRADING_MODE: str = os.getenv("TRADING_MODE", "demo")
 
 
 class BitgetConfig(BaseModel):
     api_key: str = os.getenv("BITGET_API_KEY", "")
     secret_key: str = os.getenv("BITGET_SECRET_KEY", "")
     passphrase: str = os.getenv("BITGET_PASSPHRASE", "")
+    demo: bool = os.getenv("TRADING_MODE", "demo") in ("demo", "paper")
 
 
 class ClaudeConfig(BaseModel):
