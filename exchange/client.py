@@ -8,21 +8,24 @@ from config import BitgetConfig
 
 class ExchangeClient:
     def __init__(self, cfg: BitgetConfig):
-        self.exchange = ccxt.bitget({
-            "apiKey": cfg.api_key,
-            "secret": cfg.secret_key,
-            "password": cfg.passphrase,
-            "sandbox": cfg.sandbox,
+        params = {
             "enableRateLimit": True,
             "options": {
-                "defaultType": "swap",  # futures by default
+                "defaultType": "swap",
             },
-        })
-        self.sandbox = cfg.sandbox
-        logger.info(f"Exchange initialized (sandbox={cfg.sandbox})")
+        }
+        # Only add auth if keys are provided (paper mode may not have them)
+        if cfg.api_key:
+            params["apiKey"] = cfg.api_key
+            params["secret"] = cfg.secret_key
+            params["password"] = cfg.passphrase
+
+        self.exchange = ccxt.bitget(params)
+        self._has_auth = bool(cfg.api_key)
+        logger.info(f"Exchange initialized (auth={'yes' if self._has_auth else 'no (public data only)'})")
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> pd.DataFrame:
-        """Fetch OHLCV candles as DataFrame."""
+        """Fetch OHLCV candles as DataFrame. Works without auth."""
         raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -30,11 +33,11 @@ class ExchangeClient:
         return df
 
     def fetch_ticker(self, symbol: str) -> dict:
-        """Get current ticker data."""
+        """Get current ticker data. Works without auth."""
         return self.exchange.fetch_ticker(symbol)
 
     def fetch_balance(self) -> dict:
-        """Get account balance."""
+        """Get account balance. Requires auth."""
         balance = self.exchange.fetch_balance()
         return {
             "total": balance.get("total", {}),
@@ -57,7 +60,7 @@ class ExchangeClient:
         return [p for p in positions if float(p.get("contracts", 0)) > 0]
 
     def fetch_order_book(self, symbol: str, limit: int = 20) -> dict:
-        """Get order book."""
+        """Get order book. Works without auth."""
         return self.exchange.fetch_order_book(symbol, limit)
 
     def create_market_order(self, symbol: str, side: str, amount: float, params: dict | None = None) -> dict:

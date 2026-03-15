@@ -6,12 +6,15 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+# paper = только анализ и логирование, без реальных ордеров
+# live = реальная торговля
+TRADING_MODE: str = os.getenv("TRADING_MODE", "paper")
+
 
 class BitgetConfig(BaseModel):
     api_key: str = os.getenv("BITGET_API_KEY", "")
     secret_key: str = os.getenv("BITGET_SECRET_KEY", "")
     passphrase: str = os.getenv("BITGET_PASSPHRASE", "")
-    sandbox: bool = os.getenv("TRADING_MODE", "testnet") == "testnet"
 
 
 class ClaudeConfig(BaseModel):
@@ -38,6 +41,10 @@ class TradingConfig(BaseModel):
     analysis_interval_minutes: int = 30
 
 
+class PaperConfig(BaseModel):
+    initial_balance: float = float(os.getenv("PAPER_BALANCE", "10000"))
+
+
 class NotificationConfig(BaseModel):
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -54,6 +61,7 @@ class Config(BaseModel):
     bitget: BitgetConfig = BitgetConfig()
     claude: ClaudeConfig = ClaudeConfig()
     trading: TradingConfig = TradingConfig()
+    paper: PaperConfig = PaperConfig()
     notifications: NotificationConfig = NotificationConfig()
     news: NewsConfig = NewsConfig()
 
