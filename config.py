@@ -55,7 +55,18 @@ class NotificationConfig(BaseModel):
 
 class NewsConfig(BaseModel):
     api_key: str = os.getenv("NEWS_API_KEY", "")
-    keywords: list[str] = ["bitcoin", "ethereum", "crypto", "SEC", "Fed", "inflation"]
+    keywords: list[str] = [
+        # Крипто
+        "bitcoin", "ethereum", "crypto", "altcoin",
+        # Регуляторы и финансы
+        "SEC", "Fed", "interest rate", "inflation", "CPI",
+        # Геополитика, влияющая на рынки
+        "sanctions", "trade war", "tariffs", "war", "conflict",
+        "China", "Russia", "NATO", "OPEC",
+        # Макроэкономика
+        "recession", "GDP", "unemployment", "banking crisis",
+        "dollar", "treasury", "stock market crash",
+    ]
     check_interval_minutes: int = 60
 
 

@@ -109,14 +109,27 @@ class NewsFetcher:
 
     def get_market_context(self) -> dict:
         """Get full market context for AI decision making."""
-        news = self.fetch_newsapi(" OR ".join(self.cfg.keywords[:3]))
+        # Запрашиваем новости по двум группам: крипто + геополитика/макро
+        crypto_keywords = [k for k in self.cfg.keywords if k in (
+            "bitcoin", "ethereum", "crypto", "altcoin",
+            "SEC", "Fed", "interest rate", "inflation", "CPI",
+        )]
+        geopolitics_keywords = [k for k in self.cfg.keywords if k not in crypto_keywords]
+
+        crypto_news = self.fetch_newsapi(" OR ".join(crypto_keywords[:5]))
+        geo_news = self.fetch_newsapi(" OR ".join(geopolitics_keywords[:5])) if geopolitics_keywords else []
+
         trending = self.fetch_coingecko_trending()
         fear_greed = self.fetch_fear_greed_index()
 
         return {
-            "news_headlines": [
+            "crypto_news": [
                 {"title": n["title"], "source": n["source"]}
-                for n in news[:10]
+                for n in crypto_news[:10]
+            ],
+            "geopolitics_macro_news": [
+                {"title": n["title"], "source": n["source"]}
+                for n in geo_news[:10]
             ],
             "trending_coins": trending[:7],
             "fear_greed_index": fear_greed,
