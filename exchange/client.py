@@ -6,6 +6,23 @@ from loguru import logger
 from config import BitgetConfig
 
 
+class _BitgetDemo(ccxt.bitget):
+    """Bitget subclass that adds the PAPTRADING header for demo/simulated trading.
+
+    ccxt's built-in set_sandbox_mode() is broken for Bitget — it mixes demo-symbol
+    prefixes with the paptrading header, causing 40099 errors and missing markets.
+    The correct approach: use production endpoints + PAPTRADING=1 header on every
+    authenticated request.  See https://github.com/ccxt/ccxt/issues/25523
+    """
+
+    def sign(self, path, api="public", method="GET", params=None, headers=None, body=None):
+        result = super().sign(path, api, method, params or {}, headers, body)
+        if result.get("headers") is None:
+            result["headers"] = {}
+        result["headers"]["PAPTRADING"] = "1"
+        return result
+
+
 class ExchangeClient:
     def __init__(self, cfg: BitgetConfig):
         params = {
@@ -20,11 +37,12 @@ class ExchangeClient:
             params["secret"] = cfg.secret_key
             params["password"] = cfg.passphrase
 
-        self.exchange = ccxt.bitget(params)
-
-        # Activate demo/sandbox mode if configured
+        # Use custom subclass for demo trading (adds PAPTRADING header),
+        # regular ccxt.bitget for live/public-only mode.
         if cfg.demo and cfg.api_key:
-            self.exchange.set_sandbox_mode(True)
+            self.exchange = _BitgetDemo(params)
+        else:
+            self.exchange = ccxt.bitget(params)
 
         self._has_auth = bool(cfg.api_key)
         self._is_demo = cfg.demo
@@ -35,11 +53,20 @@ class ExchangeClient:
         self.exchange.load_markets()
 
     def validate_symbols(self, symbols: list[str]) -> list[str]:
-        """Return only symbols available on the exchange."""
+        """Return only symbols available on the exchange.
+
+        Bitget swap markets use 'BTC/USDT:USDT' format internally.
+        Config uses the shorter 'BTC/USDT' form — we try both.
+        """
         valid = []
         for s in symbols:
+            # Try exact match first, then swap format (BTC/USDT -> BTC/USDT:USDT)
+            swap_symbol = f"{s}:USDT" if ":USDT" not in s else s
             if s in self.exchange.markets:
                 valid.append(s)
+            elif swap_symbol in self.exchange.markets:
+                valid.append(swap_symbol)
+                logger.info(f"Mapped {s} -> {swap_symbol} (swap market)")
             else:
                 logger.warning(f"Symbol {s} not available on exchange (demo={self._is_demo}), skipping")
         return valid
