@@ -263,6 +263,21 @@ class TradingAgent:
                 self.paper_trades.append(trade)
                 logger.info(f"[БУМАГА] Закрытие {symbol} @ {price} | PnL: {pnl:+.2f} USDT | Баланс: {self.paper_balance:.2f}")
 
+        elif action in ("trigger_long", "trigger_short"):
+            trigger_price = decision.get("params", {}).get("trigger_price")
+            if trigger_price:
+                side = "long" if action == "trigger_long" else "short"
+                logger.info(f"[БУМАГА] Триггерный ордер {side} {symbol} @ триггер {trigger_price} | Причина: {reason}")
+                trade = {
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "symbol": symbol,
+                    "action": action,
+                    "trigger_price": trigger_price,
+                    "confidence": confidence,
+                    "reason": reason,
+                }
+                self.paper_trades.append(trade)
+
         elif action == "hold":
             logger.info(f"[БУМАГА] Удержание {symbol}: {reason}")
 
@@ -314,6 +329,16 @@ class TradingAgent:
                 if limit_price:
                     amount = self.risk.calculate_position_size(balance, limit_price, limit_price * 1.03)
                     result = self.orders.place_limit_order(symbol, "sell", amount, limit_price)
+
+            elif action == "trigger_long":
+                trigger_price = params.get("trigger_price")
+                if trigger_price:
+                    result = self.orders.place_trigger_order(symbol, "long", balance, trigger_price)
+
+            elif action == "trigger_short":
+                trigger_price = params.get("trigger_price")
+                if trigger_price:
+                    result = self.orders.place_trigger_order(symbol, "short", balance, trigger_price)
 
             elif action == "hold":
                 logger.info(f"Удержание {symbol}: {reason}")

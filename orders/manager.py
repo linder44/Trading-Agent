@@ -164,6 +164,39 @@ class OrderManager:
             logger.error(f"Ошибка размещения лимитного ордера {symbol}: {e}")
             return None
 
+    def place_trigger_order(self, symbol: str, side: str, balance: float, trigger_price: float) -> dict | None:
+        """Разместить триггерный ордер — откроет позицию по рынку, когда цена достигнет trigger_price."""
+        can_open, reason = self.risk.can_open_position(symbol, balance)
+        if not can_open:
+            logger.warning(f"Не могу разместить триггерный ордер {symbol}: {reason}")
+            return None
+
+        stop_loss = self.risk.compute_stop_loss(trigger_price, side)
+        amount = self.risk.calculate_position_size(balance, trigger_price, stop_loss)
+
+        if amount <= 0:
+            logger.warning(f"Размер позиции слишком мал для триггерного ордера {symbol}")
+            return None
+
+        market = self.exchange.get_market_info(symbol)
+        amount_precision = market.get("precision", {}).get("amount", 8)
+        amount = round(amount, amount_precision)
+
+        try:
+            order_side = "buy" if side == "long" else "sell"
+            order = self.exchange.create_trigger_order(symbol, order_side, amount, trigger_price)
+            return {
+                "action": f"trigger_{side}",
+                "symbol": symbol,
+                "side": side,
+                "amount": amount,
+                "trigger_price": trigger_price,
+                "order_id": order["id"],
+            }
+        except Exception as e:
+            logger.error(f"Ошибка размещения триггерного ордера {symbol}: {e}")
+            return None
+
     def update_stop_loss(self, symbol: str, new_sl_price: float) -> dict | None:
         """Update stop loss for an existing position (trailing stop)."""
         if symbol not in self.risk.positions:

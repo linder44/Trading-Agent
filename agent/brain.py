@@ -1,12 +1,48 @@
 """AI Trading Brain - Claude-powered decision engine."""
 
 import json
+import re
 from datetime import datetime
 
 import anthropic
 from loguru import logger
 
 from config import ClaudeConfig
+
+
+def _repair_truncated_json(raw: str) -> dict | None:
+    """Попытка восстановить обрезанный JSON-ответ от Claude.
+
+    Если ответ обрезан по max_tokens, JSON будет неполным.
+    Пытаемся извлечь уже полные решения из массива decisions.
+    """
+    try:
+        # Ищем все полностью завершённые объекты в массиве decisions
+        decisions = []
+        pattern = r'\{\s*"symbol"\s*:.*?"params"\s*:\s*\{[^}]*\}\s*\}'
+        for m in re.finditer(pattern, raw, re.DOTALL):
+            try:
+                obj = json.loads(m.group())
+                decisions.append(obj)
+            except json.JSONDecodeError:
+                continue
+
+        if not decisions:
+            return None
+
+        # Пытаемся извлечь market_outlook и risk_level
+        outlook_match = re.search(r'"market_outlook"\s*:\s*"([^"]*)"', raw)
+        risk_match = re.search(r'"risk_level"\s*:\s*"([^"]*)"', raw)
+
+        result = {
+            "decisions": decisions,
+            "market_outlook": outlook_match.group(1) if outlook_match else "Ответ был обрезан, данные частичные",
+            "risk_level": risk_match.group(1) if risk_match else "medium",
+        }
+        logger.warning(f"JSON был обрезан. Восстановлено {len(decisions)} решений из неполного ответа.")
+        return result
+    except Exception:
+        return None
 
 
 SYSTEM_PROMPT = """Ты — экспертный автономный агент для торговли криптовалютами. Ты анализируешь рыночные данные и принимаешь торговые решения.
@@ -151,11 +187,12 @@ SYSTEM_PROMPT = """Ты — экспертный автономный агент
   "decisions": [
     {
       "symbol": "BTC/USDT",
-      "action": "open_long" | "open_short" | "close" | "update_sl" | "hold" | "limit_buy" | "limit_sell",
+      "action": "open_long" | "open_short" | "close" | "update_sl" | "hold" | "limit_buy" | "limit_sell" | "trigger_long" | "trigger_short",
       "confidence": 0.0-1.0,
       "reason": "Краткое обоснование на русском языке с конкретными индикаторами и данными",
       "params": {
         "limit_price": null,
+        "trigger_price": null,
         "new_stop_loss": null
       }
     }
@@ -163,6 +200,15 @@ SYSTEM_PROMPT = """Ты — экспертный автономный агент
   "market_outlook": "Краткая общая оценка рынка на русском языке с ключевыми факторами",
   "risk_level": "low" | "medium" | "high"
 }
+
+### Типы ордеров:
+- **open_long / open_short** — немедленный вход по рынку
+- **trigger_long** — триггерный ордер на лонг: когда цена достигнет trigger_price, откроется лонг по рынку. Используй когда ждёшь откат к уровню (например, "жду откат до 72500") или пробой уровня вверх.
+- **trigger_short** — триггерный ордер на шорт: когда цена достигнет trigger_price, откроется шорт по рынку. Используй для входа при пробое вниз или отскоке от сопротивления.
+- **limit_buy / limit_sell** — лимитные ордера по указанной цене
+- **close** — закрыть позицию
+- **update_sl** — обновить стоп-лосс
+- **hold** — ничего не делать
 
 Если хороших сетапов нет, возвращай action "hold" для каждого символа.
 Рекомендуй действия (не hold) только с confidence >= 0.6.
@@ -222,8 +268,13 @@ class TradingBrain:
             return decision
 
         except json.JSONDecodeError as e:
-            logger.error(f"Ошибка парсинга JSON-ответа Claude: {e}")
-            logger.error(f"Сырой ответ: {raw_text}")
+            logger.warning(f"Ошибка парсинга JSON-ответа Claude: {e}")
+            # Попытка восстановить обрезанный JSON
+            repaired = _repair_truncated_json(raw_text)
+            if repaired:
+                self._log_decision(repaired)
+                return repaired
+            logger.error(f"Не удалось восстановить JSON. Сырой ответ: {raw_text[:500]}...")
             return {"decisions": [], "market_outlook": "Ошибка парсинга ответа", "risk_level": "high"}
 
         except Exception as e:

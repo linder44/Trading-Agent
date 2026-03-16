@@ -24,12 +24,12 @@ class BitgetConfig(BaseModel):
 class ClaudeConfig(BaseModel):
     api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     model: str = "claude-opus-4-6"
-    max_tokens: int = 4096
+    max_tokens: int = 16384
 
 
 class TradingConfig(BaseModel):
     symbols: list[str] = [
-        # Top caps
+        # Топ-капитализация (доступны на Bitget фьючерсах)
         "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
@@ -40,28 +40,10 @@ class TradingConfig(BaseModel):
         "AVAX/USDT",
         "DOT/USDT",
         "LINK/USDT",
-        "MATIC/USDT",
         "UNI/USDT",
-        "ATOM/USDT",
         "LTC/USDT",
-        "FIL/USDT",
-        # DeFi / Layer-2
-        "ARB/USDT",
-        "OP/USDT",
-        "APT/USDT",
-        "SUI/USDT",
         "NEAR/USDT",
-        # Trending / high-vol
         "PEPE/USDT",
-        "WIF/USDT",
-        "FET/USDT",
-        "RENDER/USDT",
-        "INJ/USDT",
-        "TIA/USDT",
-        "SEI/USDT",
-        "JUP/USDT",
-        "WLD/USDT",
-        "AAVE/USDT",
     ]
     timeframes: list[str] = ["1h", "4h", "1d"]
     max_position_pct: float = 0.1  # Max 10% of portfolio per trade

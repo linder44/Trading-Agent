@@ -53,20 +53,26 @@ class ExchangeClient:
         self.exchange.load_markets()
 
     def validate_symbols(self, symbols: list[str]) -> list[str]:
-        """Return only symbols available on the exchange.
+        """Возвращает только символы, доступные на фьючерсах (swap) биржи.
 
-        Bitget swap markets use 'BTC/USDT:USDT' format internally.
-        Config uses the shorter 'BTC/USDT' form — we try both.
+        Bitget swap markets используют формат 'BTC/USDT:USDT'.
+        В конфиге используется короткий формат 'BTC/USDT' — конвертируем в swap.
+        Приоритет всегда отдаётся фьючерсному (swap) рынку.
         """
         valid = []
         for s in symbols:
-            # Try exact match first, then swap format (BTC/USDT -> BTC/USDT:USDT)
             swap_symbol = f"{s}:USDT" if ":USDT" not in s else s
-            if s in self.exchange.markets:
-                valid.append(s)
-            elif swap_symbol in self.exchange.markets:
+            if swap_symbol in self.exchange.markets:
+                if swap_symbol != s:
+                    logger.info(f"Маппинг {s} -> {swap_symbol} (фьючерсы)")
                 valid.append(swap_symbol)
-                logger.info(f"Маппинг {s} -> {swap_symbol} (swap-рынок)")
+            elif s in self.exchange.markets:
+                market = self.exchange.markets[s]
+                if market.get("swap") or market.get("future"):
+                    valid.append(s)
+                    logger.info(f"Символ {s} — фьючерсный рынок")
+                else:
+                    logger.warning(f"Символ {s} доступен только на споте, пропускаем (бот только фьючерсный)")
             else:
                 logger.warning(f"Символ {s} недоступен на бирже (демо={self._is_demo}), пропускаем")
         return valid
@@ -140,6 +146,15 @@ class ExchangeClient:
         params["triggerPrice"] = tp_price
         order = self.exchange.create_order(symbol, "market", side, amount, params=params)
         logger.info(f"Тейк-профит {side} {amount} {symbol} триггер @ {tp_price} -> {order['id']}")
+        return order
+
+    def create_trigger_order(self, symbol: str, side: str, amount: float, trigger_price: float, params: dict | None = None) -> dict:
+        """Триггерный ордер — рыночный ордер, активирующийся при достижении trigger_price."""
+        params = params or {}
+        params["triggerPrice"] = trigger_price
+        params["triggerType"] = "market_price"
+        order = self.exchange.create_order(symbol, "market", side, amount, params=params)
+        logger.info(f"Триггерный ордер {side} {amount} {symbol} триггер @ {trigger_price} -> {order['id']}")
         return order
 
     def cancel_order(self, order_id: str, symbol: str) -> dict:
