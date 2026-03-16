@@ -20,7 +20,11 @@ from loguru import logger
 from config import config, TRADING_MODE
 from exchange.client import ExchangeClient
 from analysis.technical import TechnicalAnalyzer
+from analysis.patterns import PatternRecognizer
+from analysis.onchain import OnChainAnalyzer
+from analysis.correlations import MarketCorrelations
 from news.fetcher import NewsFetcher
+from news.social import SocialSentiment
 from risk.manager import RiskManager
 from orders.manager import OrderManager
 from agent.brain import TradingBrain
@@ -40,7 +44,7 @@ class TradingAgent:
         self.mode = mode  # "paper", "demo", or "live"
 
         logger.info("=" * 60)
-        logger.info("  AUTONOMOUS AI TRADING AGENT")
+        logger.info("  AUTONOMOUS AI TRADING AGENT v2.0")
         logger.info(f"  Mode: {self.mode.upper()}")
         if self.mode == "paper":
             logger.info(f"  Paper Balance: {config.paper.initial_balance} USDT")
@@ -50,13 +54,20 @@ class TradingAgent:
         logger.info(f"  Interval: {config.trading.analysis_interval_minutes} min")
         logger.info("=" * 60)
 
+        # Core modules
         self.exchange = ExchangeClient(config.bitget)
         self.analyzer = TechnicalAnalyzer()
-        self.news = NewsFetcher(config.news)
         self.risk = RiskManager(config.trading)
         self.orders = OrderManager(self.exchange, self.risk)
         self.brain = TradingBrain(config.claude)
         self.notifier = Notifier(config.notifications)
+
+        # Enhanced analysis modules
+        self.patterns = PatternRecognizer()
+        self.onchain = OnChainAnalyzer()
+        self.correlations = MarketCorrelations()
+        self.news = NewsFetcher(config.news)
+        self.social = SocialSentiment()
 
         # Paper trading state
         self.paper_balance = config.paper.initial_balance
@@ -64,8 +75,9 @@ class TradingAgent:
 
         self._last_daily_reset = datetime.utcnow().date()
 
-        # Create logs dir
+        # Create dirs
         Path("logs").mkdir(exist_ok=True)
+        Path("data").mkdir(exist_ok=True)
 
     def run_cycle(self):
         """Run one full analysis and trading cycle."""
@@ -82,14 +94,16 @@ class TradingAgent:
         if self.mode in ("demo", "live"):
             self.orders.sync_positions_from_exchange()
 
-        # 1. Gather technical analysis for all symbols
+        # 1. Technical analysis (multi-timeframe)
         technical_data = {}
+        ohlcv_cache = {}  # Cache for pattern analysis
         for symbol in config.trading.symbols:
             try:
                 ohlcv_dict = {}
                 for tf in config.trading.timeframes:
                     ohlcv_dict[tf] = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
                 technical_data[symbol] = self.analyzer.multi_timeframe_analysis(ohlcv_dict, symbol)
+                ohlcv_cache[symbol] = ohlcv_dict
             except Exception as e:
                 logger.error(f"Failed to analyze {symbol}: {e}")
 
@@ -97,10 +111,32 @@ class TradingAgent:
             logger.warning("No technical data available, skipping cycle")
             return
 
-        # 2. Gather news and market context
+        # 2. Candlestick patterns, Fibonacci, divergences
+        logger.info("Analyzing patterns, Fibonacci levels, divergences...")
+        pattern_data = {}
+        for symbol, ohlcv_dict in ohlcv_cache.items():
+            pattern_data[symbol] = {}
+            for tf, df in ohlcv_dict.items():
+                df_with_indicators = self.analyzer.compute_indicators(df)
+                pattern_data[symbol][tf] = self.patterns.get_full_pattern_analysis(df_with_indicators)
+
+        # 3. On-chain and derivatives data
+        logger.info("Fetching on-chain data (funding rates, OI, whales)...")
+        onchain_data = self.onchain.get_full_onchain_data(self.exchange, config.trading.symbols)
+
+        # 4. News and fundamental context
+        logger.info("Fetching news and market context...")
         market_context = self.news.get_market_context()
 
-        # 3. Get portfolio state
+        # 5. Social sentiment
+        logger.info("Fetching social sentiment (Reddit, CryptoPanic)...")
+        social_data = self.social.get_full_social_data()
+
+        # 6. Market correlations (DXY, S&P500, BTC dominance)
+        logger.info("Fetching market correlations (DXY, VIX, S&P500)...")
+        correlation_data = self.correlations.get_full_correlation_data(self.exchange)
+
+        # 7. Get portfolio state
         if self.mode in ("demo", "live"):
             balance = self.exchange.fetch_usdt_balance()
         else:
@@ -110,18 +146,23 @@ class TradingAgent:
 
         logger.info(f"Balance: {balance:.2f} USDT | Positions: {portfolio['num_positions']}")
 
-        # 4. Ask Claude AI for decisions
+        # 8. Send EVERYTHING to Claude AI for decisions
+        logger.info("Sending data to Claude AI for analysis...")
         decision = self.brain.analyze_and_decide(
             technical_data=technical_data,
             market_context=market_context,
             portfolio=portfolio,
             balance=balance,
+            onchain_data=onchain_data,
+            pattern_data=pattern_data,
+            social_data=social_data,
+            correlation_data=correlation_data,
         )
 
         logger.info(f"AI Outlook: {decision.get('market_outlook', 'N/A')}")
         logger.info(f"Risk Level: {decision.get('risk_level', 'N/A')}")
 
-        # 5. Execute decisions
+        # 9. Execute decisions
         actions = decision.get("decisions", [])
         for action in actions:
             self._execute_decision(action, balance)
@@ -134,7 +175,7 @@ class TradingAgent:
         reason = decision.get("reason", "")
         params = decision.get("params", {})
 
-        if confidence < 0.6:
+        if confidence < 0.6 and action != "hold":
             logger.info(f"Skipping {symbol} {action}: low confidence ({confidence})")
             return
 
@@ -153,7 +194,6 @@ class TradingAgent:
         action = decision.get("action")
         confidence = decision.get("confidence", 0)
         reason = decision.get("reason", "")
-        params = decision.get("params", {})
 
         try:
             ticker = self.exchange.fetch_ticker(symbol)
@@ -211,7 +251,6 @@ class TradingAgent:
         # Save paper trades to file
         self._save_paper_log()
 
-        # Send notification
         msg = f"[PAPER] *{action.upper()}* {symbol}\nPrice: {price}\nConfidence: {confidence}\nReason: {reason}"
         self.notifier.send(msg)
 
@@ -281,14 +320,13 @@ class TradingAgent:
 
     def _save_paper_log(self):
         """Save paper trading log to file."""
-        Path("data").mkdir(exist_ok=True)
         log_file = Path("data/paper_trades.json")
         data = {
             "balance": self.paper_balance,
             "initial_balance": config.paper.initial_balance,
             "pnl_total": self.paper_balance - config.paper.initial_balance,
             "num_trades": len(self.paper_trades),
-            "trades": self.paper_trades[-100:],  # Last 100 trades
+            "trades": self.paper_trades[-100:],
         }
         log_file.write_text(json.dumps(data, indent=2))
 
@@ -312,7 +350,6 @@ class TradingAgent:
                 logger.error(f"Cycle error: {e}")
                 self.notifier.send(f"Cycle ERROR: {e}")
 
-            # Wait for next cycle
             wait_seconds = config.trading.analysis_interval_minutes * 60
             logger.info(f"Next cycle in {config.trading.analysis_interval_minutes} minutes...")
             time.sleep(wait_seconds)
