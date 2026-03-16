@@ -328,6 +328,17 @@ USDT Available: {balance:.2f}
         if quant_data:
             prompt += f"\n## Quantitative / Scientific Analysis (Hurst, Kalman, FFT, VaR, Entropy, Z-Score)\n{json.dumps(quant_data, indent=2)}\n"
 
+        # Report missing/empty data sources so Claude knows what's unavailable
+        missing = self._detect_missing_data(
+            onchain_data, market_context, social_data, correlation_data, quant_data,
+        )
+        if missing:
+            prompt += "\n## ⚠ Недоступные источники данных\n"
+            prompt += "Следующие источники не вернули данные (API недоступен или пуст). "
+            prompt += "Принимай решения БЕЗ этих данных, опирайся на доступные источники:\n"
+            for source in missing:
+                prompt += f"- {source}\n"
+
         prompt += """
 ## Instructions
 Analyze ALL the data above systematically:
@@ -342,10 +353,69 @@ Analyze ALL the data above systematically:
 9. Use VaR for position sizing, Shannon entropy for confidence adjustment
 10. For each symbol, decide the best action
 11. Cite specific scientific indicators in your reasoning (Hurst value, Z-score, VaR, etc.)
+12. In your reason field, EXPLICITLY reference data from on-chain, social, correlation sections — not just technical/quant
 
 Return your decisions as JSON.
 """
         return prompt
+
+    @staticmethod
+    def _detect_missing_data(
+        onchain_data: dict | None,
+        market_context: dict | None,
+        social_data: dict | None,
+        correlation_data: dict | None,
+        quant_data: dict | None,
+    ) -> list[str]:
+        """Detect which data sources returned empty or missing data."""
+        missing = []
+
+        if not onchain_data:
+            missing.append("On-chain данные (фандинг, OI, киты, нетфлоу) — полностью недоступны")
+        else:
+            market_wide = onchain_data.get("_market_wide", {})
+            if not market_wide.get("whale_alerts"):
+                missing.append("Whale Alerts (крупные транзакции китов)")
+            if market_wide.get("exchange_netflow", {}).get("signal") == "unknown":
+                missing.append("Exchange Netflow (приток/отток с бирж)")
+
+        if not market_context:
+            missing.append("Новости и фундаментальный контекст — полностью недоступны")
+        else:
+            if not market_context.get("crypto_news"):
+                missing.append("Крипто-новости (NewsAPI)")
+            if not market_context.get("geopolitics_macro_news"):
+                missing.append("Геополитические/макро новости")
+            if not market_context.get("trending_coins"):
+                missing.append("Трендовые монеты (CoinGecko)")
+
+        if not social_data:
+            missing.append("Социальные настроения — полностью недоступны")
+        else:
+            if not social_data.get("cryptopanic_hot"):
+                missing.append("CryptoPanic (горячие новости)")
+            if not social_data.get("reddit_sentiment", {}).get("top_discussions"):
+                missing.append("Reddit (дискуссии крипто-сообщества)")
+            if not social_data.get("social_trending", {}).get("trending_by_social"):
+                missing.append("LunarCrush (социальный тренд)")
+
+        if not correlation_data:
+            missing.append("Рыночные корреляции — полностью недоступны")
+        else:
+            tradfi = correlation_data.get("traditional_markets", {})
+            if "DXY" not in tradfi:
+                missing.append("DXY (индекс доллара)")
+            if "VIX" not in tradfi:
+                missing.append("VIX (индекс страха)")
+            if "SPY" not in tradfi:
+                missing.append("S&P 500")
+            if correlation_data.get("btc_dominance", {}).get("btc_dominance", 0) == 0:
+                missing.append("BTC Dominance")
+
+        if not quant_data:
+            missing.append("Количественный анализ (Хёрст, Калман, FFT, VaR) — полностью недоступен")
+
+        return missing
 
     def _log_decision(self, decision: dict):
         """Log decision for audit trail."""

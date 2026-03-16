@@ -55,7 +55,7 @@ class MarketCorrelations:
             return result
 
         except Exception as e:
-            logger.debug(f"BTC dominance fetch failed: {e}")
+            logger.warning(f"BTC dominance fetch failed: {e}")
             return {"btc_dominance": 0, "signal": "unknown"}
 
     def get_dxy_and_tradfi(self) -> dict:
@@ -100,7 +100,7 @@ class MarketCorrelations:
                         "change_pct": round(change_pct, 2),
                     }
             except Exception as e:
-                logger.debug(f"Failed to fetch {symbol}: {e}")
+                logger.warning(f"Failed to fetch {symbol}: {e}")
 
         # Add interpretations
         if "DXY" in result:
@@ -136,7 +136,7 @@ class MarketCorrelations:
                 ),
             }
         except Exception as e:
-            logger.debug(f"ETH/BTC ratio fetch failed: {e}")
+            logger.warning(f"ETH/BTC ratio fetch failed: {e}")
             return {"eth_btc_ratio": 0, "signal": "unknown"}
 
     def get_full_correlation_data(self, exchange_client=None) -> dict:

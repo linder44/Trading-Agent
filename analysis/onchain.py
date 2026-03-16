@@ -41,7 +41,7 @@ class OnChainAnalyzer:
                 ),
             }
         except Exception as e:
-            logger.debug(f"Funding rate fetch failed for {symbol}: {e}")
+            logger.warning(f"Funding rate fetch failed for {symbol}: {e}")
             return {"funding_rate": 0, "funding_rate_pct": 0, "sentiment": "unknown"}
 
     def get_open_interest(self, exchange_client, symbol: str) -> dict:
@@ -61,7 +61,7 @@ class OnChainAnalyzer:
                 "open_interest_amount": round(oi_amount, 4),
             }
         except Exception as e:
-            logger.debug(f"Open interest fetch failed for {symbol}: {e}")
+            logger.warning(f"Open interest fetch failed for {symbol}: {e}")
             return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
@@ -87,7 +87,7 @@ class OnChainAnalyzer:
                     ),
                 }
         except Exception as e:
-            logger.debug(f"Long/short ratio fetch failed for {symbol}: {e}")
+            logger.warning(f"Long/short ratio fetch failed for {symbol}: {e}")
 
         return {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 
@@ -123,7 +123,7 @@ class OnChainAnalyzer:
                 self._set_cache(cache_key, result)
                 return result
         except Exception as e:
-            logger.debug(f"Whale alert fetch failed: {e}")
+            logger.warning(f"Whale alert fetch failed: {e}")
 
         return []
 
@@ -156,7 +156,7 @@ class OnChainAnalyzer:
                     self._set_cache(cache_key, result)
                     return result
         except Exception as e:
-            logger.debug(f"Exchange netflow fetch failed: {e}")
+            logger.warning(f"Exchange netflow fetch failed: {e}")
 
         return {"btc_netflow": 0, "signal": "unknown"}
 

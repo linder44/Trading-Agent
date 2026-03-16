@@ -58,7 +58,7 @@ class SocialSentiment:
                 self._set_cache(cache_key, result)
                 return result
         except Exception as e:
-            logger.debug(f"CryptoPanic fetch failed: {e}")
+            logger.warning(f"CryptoPanic fetch failed: {e}")
 
         return []
 
@@ -91,7 +91,7 @@ class SocialSentiment:
                             "upvote_ratio": data.get("upvote_ratio", 0.5),
                         })
             except Exception as e:
-                logger.debug(f"Reddit r/{sub} fetch failed: {e}")
+                logger.warning(f"Reddit r/{sub} fetch failed: {e}")
 
         # Calculate overall sentiment
         if all_posts:
@@ -141,7 +141,7 @@ class SocialSentiment:
                 self._set_cache(cache_key, result)
                 return result
         except Exception as e:
-            logger.debug(f"LunarCrush fetch failed: {e}")
+            logger.warning(f"LunarCrush fetch failed: {e}")
 
         return {"trending_by_social": []}
 

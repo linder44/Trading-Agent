@@ -163,7 +163,10 @@ class TradingAgent:
 
         logger.info(f"Баланс: {balance:.2f} USDT | Позиции: {portfolio['num_positions']}")
 
-        # 8. Отправляем ВСЁ в Claude AI для принятия решений
+        # 8. Сводка качества данных
+        self._log_data_quality(onchain_data, market_context, social_data, correlation_data)
+
+        # 9. Отправляем ВСЁ в Claude AI для принятия решений
         logger.info("Отправляем данные в Claude AI для анализа...")
         decision = self.brain.analyze_and_decide(
             technical_data=technical_data,
@@ -184,6 +187,77 @@ class TradingAgent:
         actions = decision.get("decisions", [])
         for action in actions:
             self._execute_decision(action, balance)
+
+    def _log_data_quality(self, onchain_data, market_context, social_data, correlation_data):
+        """Log summary of what data was actually collected vs empty."""
+        sources = {}
+
+        # On-chain
+        if onchain_data:
+            market_wide = onchain_data.get("_market_wide", {})
+            sources["whale_alerts"] = len(market_wide.get("whale_alerts", []))
+            sources["exchange_netflow"] = market_wide.get("exchange_netflow", {}).get("signal", "unknown") != "unknown"
+            # Check per-symbol data (sample first symbol)
+            symbol_keys = [k for k in onchain_data if k != "_market_wide"]
+            if symbol_keys:
+                sample = onchain_data[symbol_keys[0]]
+                sources["funding_rates"] = sample.get("funding_rate", {}).get("sentiment", "unknown") != "unknown"
+                sources["open_interest"] = sample.get("open_interest", {}).get("open_interest_value_usd", 0) > 0
+                sources["long_short_ratio"] = sample.get("long_short_ratio", {}).get("signal", "neutral") != "neutral" or sample.get("long_short_ratio", {}).get("ratio", 1.0) != 1.0
+        else:
+            sources["funding_rates"] = False
+            sources["open_interest"] = False
+            sources["long_short_ratio"] = False
+            sources["whale_alerts"] = 0
+            sources["exchange_netflow"] = False
+
+        # News
+        if market_context:
+            sources["crypto_news"] = len(market_context.get("crypto_news", []))
+            sources["geo_news"] = len(market_context.get("geopolitics_macro_news", []))
+            sources["trending_coins"] = len(market_context.get("trending_coins", []))
+            sources["fear_greed"] = market_context.get("fear_greed_index", {}).get("value", 50) != 50
+        else:
+            sources["crypto_news"] = 0
+            sources["geo_news"] = 0
+            sources["trending_coins"] = 0
+            sources["fear_greed"] = False
+
+        # Social
+        if social_data:
+            sources["cryptopanic"] = len(social_data.get("cryptopanic_hot", []))
+            sources["reddit"] = len(social_data.get("reddit_sentiment", {}).get("top_discussions", []))
+            sources["lunarcrush"] = len(social_data.get("social_trending", {}).get("trending_by_social", []))
+        else:
+            sources["cryptopanic"] = 0
+            sources["reddit"] = 0
+            sources["lunarcrush"] = 0
+
+        # Correlations
+        if correlation_data:
+            tradfi = correlation_data.get("traditional_markets", {})
+            sources["dxy"] = "DXY" in tradfi
+            sources["vix"] = "VIX" in tradfi
+            sources["sp500"] = "SPY" in tradfi
+            sources["btc_dominance"] = correlation_data.get("btc_dominance", {}).get("btc_dominance", 0) > 0
+        else:
+            sources["dxy"] = False
+            sources["vix"] = False
+            sources["sp500"] = False
+            sources["btc_dominance"] = False
+
+        # Log summary
+        loaded = []
+        empty = []
+        for name, val in sources.items():
+            if isinstance(val, bool):
+                (loaded if val else empty).append(name)
+            elif isinstance(val, int):
+                (loaded if val > 0 else empty).append(f"{name}({val})" if val > 0 else name)
+
+        logger.info(f"Данные загружены: {', '.join(loaded) if loaded else 'нет'}")
+        if empty:
+            logger.warning(f"Данные ПУСТЫЕ/недоступны: {', '.join(empty)}")
 
     def _execute_decision(self, decision: dict, balance: float):
         """Execute a single AI trading decision."""
