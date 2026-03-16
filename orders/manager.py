@@ -28,10 +28,10 @@ class OrderManager:
             logger.warning(f"Размер позиции слишком мал для {symbol}")
             return None
 
-        # Round amount to market precision
-        market = self.exchange.get_market_info(symbol)
-        amount_precision = market.get("precision", {}).get("amount", 8)
-        amount = round(amount, amount_precision)
+        # Round amount and prices to market precision
+        amount = self.exchange.round_amount(symbol, amount)
+        stop_loss = self.exchange.round_price(symbol, stop_loss)
+        take_profit = self.exchange.round_price(symbol, take_profit)
 
         try:
             # Place market entry
@@ -80,9 +80,9 @@ class OrderManager:
         if amount <= 0:
             return None
 
-        market = self.exchange.get_market_info(symbol)
-        amount_precision = market.get("precision", {}).get("amount", 8)
-        amount = round(amount, amount_precision)
+        amount = self.exchange.round_amount(symbol, amount)
+        stop_loss = self.exchange.round_price(symbol, stop_loss)
+        take_profit = self.exchange.round_price(symbol, take_profit)
 
         try:
             entry_order = self.exchange.create_market_order(symbol, "sell", amount)
@@ -178,9 +178,8 @@ class OrderManager:
             logger.warning(f"Размер позиции слишком мал для триггерного ордера {symbol}")
             return None
 
-        market = self.exchange.get_market_info(symbol)
-        amount_precision = market.get("precision", {}).get("amount", 8)
-        amount = round(amount, amount_precision)
+        amount = self.exchange.round_amount(symbol, amount)
+        trigger_price = self.exchange.round_price(symbol, trigger_price)
 
         try:
             order_side = "buy" if side == "long" else "sell"
@@ -203,6 +202,7 @@ class OrderManager:
             return None
 
         pos = self.risk.positions[symbol]
+        new_sl_price = self.exchange.round_price(symbol, new_sl_price)
 
         try:
             # Cancel old SL orders (keep TP)

@@ -181,3 +181,11 @@ class ExchangeClient:
         """Get market info (min order size, tick size, etc.)."""
         self.exchange.load_markets()
         return self.exchange.market(symbol)
+
+    def round_amount(self, symbol: str, amount: float) -> float:
+        """Round amount to market precision using ccxt's built-in method."""
+        return float(self.exchange.amount_to_precision(symbol, amount))
+
+    def round_price(self, symbol: str, price: float) -> float:
+        """Round price to market precision using ccxt's built-in method."""
+        return float(self.exchange.price_to_precision(symbol, price))
