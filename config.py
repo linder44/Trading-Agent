@@ -29,15 +29,43 @@ class ClaudeConfig(BaseModel):
 
 class TradingConfig(BaseModel):
     symbols: list[str] = [
+        # Top caps
         "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
         "XRP/USDT",
         "BNB/USDT",
+        "ADA/USDT",
+        "DOGE/USDT",
+        "AVAX/USDT",
+        "DOT/USDT",
+        "LINK/USDT",
+        "MATIC/USDT",
+        "UNI/USDT",
+        "ATOM/USDT",
+        "LTC/USDT",
+        "FIL/USDT",
+        # DeFi / Layer-2
+        "ARB/USDT",
+        "OP/USDT",
+        "APT/USDT",
+        "SUI/USDT",
+        "NEAR/USDT",
+        # Trending / high-vol
+        "PEPE/USDT",
+        "WIF/USDT",
+        "FET/USDT",
+        "RENDER/USDT",
+        "INJ/USDT",
+        "TIA/USDT",
+        "SEI/USDT",
+        "JUP/USDT",
+        "WLD/USDT",
+        "AAVE/USDT",
     ]
     timeframes: list[str] = ["1h", "4h", "1d"]
     max_position_pct: float = 0.1  # Max 10% of portfolio per trade
-    max_open_positions: int = 5
+    max_open_positions: int = 10
     default_leverage: int = 1  # No leverage by default (safe)
     stop_loss_pct: float = 0.03  # 3% stop loss
     take_profit_pct: float = 0.06  # 6% take profit (2:1 RR)
