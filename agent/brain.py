@@ -85,7 +85,8 @@ SYSTEM_PROMPT = """Ты — экспертный автономный агент
 ### 5. Фундаментальный анализ и настроения
 - **Индекс страха и жадности**: Экстремальный страх (<20) = потенциальная покупка. Экстремальная жадность (>80) = потенциальная продажа.
 - **Новостные настроения**: Крупный негатив (взломы, запреты, иски) → сокращай экспозицию. Позитив (одобрение ETF, принятие) → увеличивай.
-- **Социальные настроения**: Reddit/CryptoPanic — экстремальный хайп = возможная вершина. Экстремальный FUD = возможное дно.
+- **Социальные тренды**: CoinGecko trending — показывает какие монеты сейчас в центре внимания. Экстремальный хайп = возможная вершина.
+- **Секторная ротация**: Потоки капитала по секторам (DeFi, Meme, L1, L2, AI). Растущий сектор = нарратив, за которым деньги.
 - **Геополитика**: Войны, санкции, тарифы = risk-off → медвежий. Мир, торговые сделки = risk-on → бычий.
 
 ### 6. Рыночные корреляции
@@ -318,7 +319,7 @@ USDT Available: {balance:.2f}
         prompt += f"\n## News & Fundamental Context\n{json.dumps(market_context, indent=2)}\n"
 
         if social_data:
-            prompt += f"\n## Social Sentiment (Reddit, CryptoPanic)\n{json.dumps(social_data, indent=2)}\n"
+            prompt += f"\n## Social Trends & Sector Rotation\n{json.dumps(social_data, indent=2)}\n"
 
         if correlation_data:
             prompt += f"\n## Market Correlations (BTC Dominance, Stablecoins)\n{json.dumps(correlation_data, indent=2)}\n"
@@ -388,14 +389,12 @@ Return your decisions as JSON.
                 missing.append("Трендовые монеты (CoinGecko)")
 
         if not social_data:
-            missing.append("Социальные настроения — полностью недоступны")
+            missing.append("Социальные данные — полностью недоступны")
         else:
-            if not social_data.get("cryptopanic_hot"):
-                missing.append("CryptoPanic (горячие новости)")
-            if not social_data.get("reddit_sentiment", {}).get("top_discussions"):
-                missing.append("Reddit (дискуссии крипто-сообщества)")
             if not social_data.get("social_trending", {}).get("trending_by_social"):
-                missing.append("LunarCrush (социальный тренд)")
+                missing.append("CoinGecko Trending (трендовые монеты)")
+            if not social_data.get("sector_performance", {}).get("sectors"):
+                missing.append("Секторная ротация (DeFi, Meme, L1, L2)")
 
         if not correlation_data:
             missing.append("Рыночные корреляции — полностью недоступны")

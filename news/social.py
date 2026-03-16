@@ -1,12 +1,10 @@
-"""Social sentiment and additional news sources.
+"""Social sentiment and market momentum sources.
 
-Sources:
-- CryptoPanic: aggregated crypto news with sentiment (requires free API key from cryptopanic.com)
-- Reddit: crypto subreddit sentiment via old.reddit.com JSON
-- CoinGecko trending: social momentum proxy (free, no key)
+All sources are free and require no API keys:
+- CoinGecko trending: social momentum proxy (most searched coins)
+- CoinGecko categories: capital flow into DeFi, Meme, L1, L2 sectors
 """
 
-import os
 import time
 from datetime import datetime
 
@@ -15,123 +13,11 @@ from loguru import logger
 
 
 class SocialSentiment:
-    """Fetches social media and alternative news sentiment."""
+    """Fetches social momentum and sector rotation data."""
 
     def __init__(self):
         self._cache: dict = {}
         self._cache_ttl = 600  # 10 min cache
-        self._cryptopanic_token = os.getenv("CRYPTOPANIC_API_KEY", "")
-
-    def fetch_cryptopanic(self, filter_type: str = "hot") -> list[dict]:
-        """Fetch news from CryptoPanic.
-
-        Requires a free API key from https://cryptopanic.com/developers/api/
-        Set CRYPTOPANIC_API_KEY in .env to enable.
-        filter_type: hot | rising | bullish | bearish | important
-        """
-        if not self._cryptopanic_token:
-            return []
-
-        cache_key = f"cryptopanic_{filter_type}"
-        if self._is_cached(cache_key):
-            return self._cache[cache_key]["data"]
-
-        try:
-            resp = requests.get(
-                "https://cryptopanic.com/api/free/v1/posts/",
-                params={
-                    "auth_token": self._cryptopanic_token,
-                    "filter": filter_type,
-                    "public": "true",
-                },
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                posts = resp.json().get("results", [])
-                result = [
-                    {
-                        "title": p.get("title", ""),
-                        "source": p.get("source", {}).get("title", ""),
-                        "published_at": p.get("published_at", ""),
-                        "kind": p.get("kind", ""),
-                        "currencies": [c["code"] for c in p.get("currencies", [])],
-                        "votes": {
-                            "positive": p.get("votes", {}).get("positive", 0),
-                            "negative": p.get("votes", {}).get("negative", 0),
-                        },
-                    }
-                    for p in posts[:15]
-                ]
-                self._set_cache(cache_key, result)
-                return result
-            else:
-                logger.warning(f"CryptoPanic returned {resp.status_code}")
-        except Exception as e:
-            logger.warning(f"CryptoPanic fetch failed: {e}")
-
-        return []
-
-    def fetch_reddit_sentiment(self) -> dict:
-        """Fetch sentiment from crypto subreddits via Reddit JSON API.
-
-        Uses old.reddit.com which is more reliable for JSON access.
-        """
-        cache_key = "reddit_sentiment"
-        if self._is_cached(cache_key):
-            return self._cache[cache_key]["data"]
-
-        subreddits = ["cryptocurrency", "bitcoin"]
-        all_posts = []
-
-        for sub in subreddits:
-            try:
-                resp = requests.get(
-                    f"https://old.reddit.com/r/{sub}/hot.json",
-                    params={"limit": 10, "raw_json": 1},
-                    headers={
-                        "User-Agent": "TradingBot/2.0 (market research; +https://github.com)",
-                        "Accept": "application/json",
-                    },
-                    timeout=10,
-                )
-                if resp.status_code == 200:
-                    posts = resp.json().get("data", {}).get("children", [])
-                    for p in posts:
-                        data = p.get("data", {})
-                        if data.get("stickied"):
-                            continue
-                        all_posts.append({
-                            "subreddit": sub,
-                            "title": data.get("title", ""),
-                            "score": data.get("score", 0),
-                            "num_comments": data.get("num_comments", 0),
-                            "upvote_ratio": data.get("upvote_ratio", 0.5),
-                        })
-                elif resp.status_code == 429:
-                    logger.warning(f"Reddit rate limited on r/{sub}, skipping")
-                    break
-                else:
-                    logger.warning(f"Reddit r/{sub} returned {resp.status_code}")
-            except Exception as e:
-                logger.warning(f"Reddit r/{sub} fetch failed: {e}")
-
-        if all_posts:
-            avg_ratio = sum(p["upvote_ratio"] for p in all_posts) / len(all_posts)
-            top_posts = sorted(all_posts, key=lambda x: x["score"], reverse=True)[:10]
-        else:
-            avg_ratio = 0.5
-            top_posts = []
-
-        result = {
-            "avg_upvote_ratio": round(avg_ratio, 2),
-            "sentiment": "bullish" if avg_ratio > 0.7 else ("bearish" if avg_ratio < 0.4 else "neutral"),
-            "top_discussions": [
-                {"title": p["title"], "score": p["score"], "sub": p["subreddit"]}
-                for p in top_posts[:7]
-            ],
-        }
-        self._set_cache(cache_key, result)
-        return result
 
     def fetch_coingecko_trending(self) -> dict:
         """Fetch trending search coins from CoinGecko (free, no key).
@@ -168,13 +54,72 @@ class SocialSentiment:
 
         return {"trending_by_social": []}
 
+    def fetch_sector_performance(self) -> dict:
+        """Fetch top crypto category performance from CoinGecko.
+
+        Shows where capital is flowing: DeFi, Meme coins, L1, L2, etc.
+        Rising category = sector rotation into that narrative.
+        """
+        cache_key = "sector_perf"
+        if self._is_cached(cache_key):
+            return self._cache[cache_key]["data"]
+
+        try:
+            resp = requests.get(
+                "https://api.coingecko.com/api/v3/coins/categories",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                categories = resp.json()
+                # Pick key sectors relevant to trading
+                key_sectors = {
+                    "layer-1": "Layer 1",
+                    "layer-2": "Layer 2",
+                    "decentralized-finance-defi": "DeFi",
+                    "meme-token": "Meme Coins",
+                    "artificial-intelligence": "AI Tokens",
+                    "gaming": "Gaming/Metaverse",
+                    "real-world-assets-rwa": "RWA",
+                }
+                sectors = []
+                for cat in categories:
+                    cat_id = cat.get("id", "")
+                    if cat_id in key_sectors:
+                        change_24h = cat.get("market_cap_change_24h", 0) or 0
+                        sectors.append({
+                            "sector": key_sectors[cat_id],
+                            "market_cap_change_24h": round(change_24h, 2),
+                            "volume_24h": cat.get("volume_24h", 0),
+                            "top_coins_count": cat.get("top_3_coins_count", 0),
+                        })
+
+                # Sort by 24h change to show leaders/laggards
+                sectors.sort(key=lambda x: x["market_cap_change_24h"], reverse=True)
+
+                # Determine overall narrative
+                if sectors:
+                    best = sectors[0]
+                    worst = sectors[-1]
+                    narrative = f"{best['sector']} лидирует ({best['market_cap_change_24h']:+.1f}%), {worst['sector']} отстаёт ({worst['market_cap_change_24h']:+.1f}%)"
+                else:
+                    narrative = "unknown"
+
+                result = {
+                    "sectors": sectors,
+                    "narrative": narrative,
+                }
+                self._set_cache(cache_key, result)
+                return result
+        except Exception as e:
+            logger.warning(f"CoinGecko categories fetch failed: {e}")
+
+        return {"sectors": [], "narrative": "unknown"}
+
     def get_full_social_data(self) -> dict:
-        """Get all social sentiment data."""
+        """Get all social/momentum data."""
         return {
-            "cryptopanic_hot": self.fetch_cryptopanic("hot"),
-            "cryptopanic_bearish": self.fetch_cryptopanic("bearish"),
-            "reddit_sentiment": self.fetch_reddit_sentiment(),
             "social_trending": self.fetch_coingecko_trending(),
+            "sector_performance": self.fetch_sector_performance(),
             "fetched_at": datetime.utcnow().isoformat(),
         }
 

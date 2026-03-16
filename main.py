@@ -146,11 +146,11 @@ class TradingAgent:
         market_context = self.news.get_market_context()
 
         # 5. Социальные настроения
-        logger.info("Загружаем социальные настроения (Reddit, CryptoPanic)...")
+        logger.info("Загружаем социальные данные (тренды, секторы)...")
         social_data = self.social.get_full_social_data()
 
         # 6. Рыночные корреляции (DXY, S&P500, доминация BTC)
-        logger.info("Загружаем рыночные корреляции (DXY, VIX, S&P500)...")
+        logger.info("Загружаем рыночные корреляции (BTC Dominance, стейблкоины)...")
         correlation_data = self.correlations.get_full_correlation_data()
 
         # 7. Get portfolio state
@@ -225,13 +225,11 @@ class TradingAgent:
 
         # Social
         if social_data:
-            sources["cryptopanic"] = len(social_data.get("cryptopanic_hot", []))
-            sources["reddit"] = len(social_data.get("reddit_sentiment", {}).get("top_discussions", []))
-            sources["lunarcrush"] = len(social_data.get("social_trending", {}).get("trending_by_social", []))
+            sources["trending_coins"] = len(social_data.get("social_trending", {}).get("trending_by_social", []))
+            sources["sector_rotation"] = len(social_data.get("sector_performance", {}).get("sectors", []))
         else:
-            sources["cryptopanic"] = 0
-            sources["reddit"] = 0
-            sources["lunarcrush"] = 0
+            sources["trending_coins"] = 0
+            sources["sector_rotation"] = 0
 
         # Correlations
         if correlation_data:

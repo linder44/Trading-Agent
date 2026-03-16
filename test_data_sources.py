@@ -194,51 +194,30 @@ def test_bitget_orderbook():
         return False
 
 
-def test_reddit():
-    """Test Reddit JSON API."""
+def test_coingecko_categories():
+    """Test CoinGecko categories (sector rotation)."""
     try:
         resp = requests.get(
-            "https://old.reddit.com/r/cryptocurrency/hot.json",
-            params={"limit": 5, "raw_json": 1},
-            headers={
-                "User-Agent": "TradingBot/2.0 (market research; +https://github.com)",
-                "Accept": "application/json",
-            },
-            timeout=10,
-        )
-        if resp.status_code == 429:
-            logger.warning("  Rate limited by Reddit (429) — try again later")
-            return False
-        resp.raise_for_status()
-        posts = resp.json().get("data", {}).get("children", [])
-        titles = [p["data"]["title"][:60] for p in posts[:3] if not p["data"].get("stickied")]
-        for t in titles:
-            logger.info(f"  r/cryptocurrency: {t}")
-        return len(titles) > 0
-    except Exception as e:
-        logger.error(f"  FAIL: {e}")
-        return False
-
-
-def test_cryptopanic():
-    """Test CryptoPanic API (requires CRYPTOPANIC_API_KEY in .env)."""
-    import os
-    token = os.getenv("CRYPTOPANIC_API_KEY", "")
-    if not token:
-        logger.warning("  SKIP: CRYPTOPANIC_API_KEY not set. Get free key at https://cryptopanic.com/developers/api/")
-        return None
-    try:
-        resp = requests.get(
-            "https://cryptopanic.com/api/free/v1/posts/",
-            params={"auth_token": token, "filter": "hot", "public": "true"},
+            "https://api.coingecko.com/api/v3/coins/categories",
             timeout=10,
         )
         resp.raise_for_status()
-        posts = resp.json().get("results", [])
-        logger.info(f"  Got {len(posts)} hot posts")
-        if posts:
-            logger.info(f"  Latest: {posts[0].get('title', '')[:80]}")
-        return len(posts) > 0
+        categories = resp.json()
+        key_sectors = {
+            "layer-1": "Layer 1",
+            "layer-2": "Layer 2",
+            "decentralized-finance-defi": "DeFi",
+            "meme-token": "Meme Coins",
+        }
+        found = []
+        for cat in categories:
+            cat_id = cat.get("id", "")
+            if cat_id in key_sectors:
+                change = cat.get("market_cap_change_24h", 0) or 0
+                found.append(f"{key_sectors[cat_id]}: {change:+.1f}%")
+        for f in found:
+            logger.info(f"  {f}")
+        return len(found) > 0
     except Exception as e:
         logger.error(f"  FAIL: {e}")
         return False
@@ -296,9 +275,8 @@ def main():
             ("Blockchain.com Whales", test_blockchain_whale),
         ],
         "social": [
-            ("Reddit r/cryptocurrency", test_reddit),
-            ("CryptoPanic", test_cryptopanic),
             ("CoinGecko Trending", test_coingecko_trending),
+            ("CoinGecko Categories (sectors)", test_coingecko_categories),
         ],
         "news": [
             ("NewsAPI", test_newsapi),
