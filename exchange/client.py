@@ -27,6 +27,7 @@ class ExchangeClient:
             self.exchange.set_sandbox_mode(True)
 
         self._has_auth = bool(cfg.api_key)
+        self._is_demo = cfg.demo
         mode = "demo" if cfg.demo else ("auth" if self._has_auth else "public only")
         logger.info(f"Exchange initialized (mode={mode})")
 

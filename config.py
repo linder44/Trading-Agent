@@ -9,14 +9,16 @@ load_dotenv()
 # paper = только анализ и логирование, без реальных ордеров
 # demo = демо-счёт Bitget (виртуальные деньги, реальные ордера на демо)
 # live = реальная торговля (настоящие деньги!)
-TRADING_MODE: str = os.getenv("TRADING_MODE", "demo")
+_raw_mode = os.getenv("TRADING_MODE", "demo").lower()
+# "testnet" is an alias for "demo"
+TRADING_MODE: str = "demo" if _raw_mode in ("testnet", "demo") else _raw_mode
 
 
 class BitgetConfig(BaseModel):
     api_key: str = os.getenv("BITGET_API_KEY", "")
     secret_key: str = os.getenv("BITGET_SECRET_KEY", "")
     passphrase: str = os.getenv("BITGET_PASSPHRASE", "")
-    demo: bool = os.getenv("TRADING_MODE", "demo") in ("demo", "paper")
+    demo: bool = os.getenv("TRADING_MODE", "demo").lower() in ("demo", "paper", "testnet")
 
 
 class ClaudeConfig(BaseModel):

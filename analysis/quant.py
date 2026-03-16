@@ -294,7 +294,9 @@ class QuantAnalyzer:
         # Skip DC component (index 0) and very low frequencies
         min_period = 5   # Ignore cycles shorter than 5 candles
         max_period = n // 2
-        valid_mask = (freqs > 0) & (1 / freqs >= min_period) & (1 / freqs <= max_period)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            periods = np.where(freqs > 0, 1.0 / freqs, 0.0)
+        valid_mask = (freqs > 0) & (periods >= min_period) & (periods <= max_period)
 
         if not np.any(valid_mask):
             return {"dominant_cycles": [], "signal": "no_cycles_detected"}

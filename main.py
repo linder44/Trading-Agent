@@ -12,7 +12,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -75,7 +75,7 @@ class TradingAgent:
         self.paper_balance = config.paper.initial_balance
         self.paper_trades: list[dict] = []
 
-        self._last_daily_reset = datetime.utcnow().date()
+        self._last_daily_reset = datetime.now(timezone.utc).date()
 
         # Create dirs
         Path("logs").mkdir(exist_ok=True)
@@ -84,10 +84,10 @@ class TradingAgent:
     def run_cycle(self):
         """Run one full analysis and trading cycle."""
         logger.info("-" * 40)
-        logger.info(f"Starting analysis cycle at {datetime.utcnow().isoformat()}")
+        logger.info(f"Starting analysis cycle at {datetime.now(timezone.utc).isoformat()}")
 
         # Reset daily stats if new day
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         if today > self._last_daily_reset:
             self.risk.reset_daily_stats()
             self._last_daily_reset = today
@@ -227,7 +227,7 @@ class TradingAgent:
             self.risk.register_position(symbol, side, price, amount, stop_loss, take_profit)
 
             trade = {
-                "time": datetime.utcnow().isoformat(),
+                "time": datetime.now(timezone.utc).isoformat(),
                 "symbol": symbol,
                 "action": action,
                 "price": price,
@@ -245,7 +245,7 @@ class TradingAgent:
                 pnl = self.risk.close_position(symbol, price)
                 self.paper_balance += pnl
                 trade = {
-                    "time": datetime.utcnow().isoformat(),
+                    "time": datetime.now(timezone.utc).isoformat(),
                     "symbol": symbol,
                     "action": "close",
                     "price": price,
