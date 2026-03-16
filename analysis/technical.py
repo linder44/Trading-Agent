@@ -8,9 +8,33 @@ from loguru import logger
 class TechnicalAnalyzer:
     """Computes technical indicators and generates signals."""
 
+    # Minimum candles required for reliable indicator computation.
+    # Largest window is EMA-200, but ta library crashes below ~14 for ATR/ADX.
+    MIN_CANDLES = 50
+
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add all technical indicators to OHLCV DataFrame."""
+        """Add all technical indicators to OHLCV DataFrame.
+
+        Requires at least MIN_CANDLES rows. With fewer rows some indicators
+        will be NaN but the function won't crash.
+        """
         df = df.copy()
+
+        if len(df) < self.MIN_CANDLES:
+            logger.warning(f"compute_indicators: только {len(df)} свечей (минимум {self.MIN_CANDLES}), индикаторы будут неполными")
+            # Return empty indicator columns to avoid downstream crashes
+            for col in [
+                "ema_9", "ema_21", "ema_50", "ema_200", "sma_50", "sma_200",
+                "macd", "macd_signal", "macd_histogram", "rsi", "rsi_6",
+                "stoch_rsi_k", "stoch_rsi_d",
+                "bb_upper", "bb_middle", "bb_lower", "bb_width", "bb_pct",
+                "atr", "adx", "adx_pos", "adx_neg",
+                "obv", "vwap", "volume_sma_20", "volume_ratio",
+                "ichimoku_a", "ichimoku_b", "ichimoku_base", "ichimoku_conv",
+                "pivot", "support_1", "resistance_1",
+            ]:
+                df[col] = float("nan")
+            return df
 
         # Trend indicators
         df["ema_9"] = ta.trend.ema_indicator(df["close"], window=9)

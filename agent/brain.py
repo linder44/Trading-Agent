@@ -22,16 +22,42 @@ def _compact_json(data, indent: int | None = None) -> str:
     return json.dumps(cleaned, indent=indent, ensure_ascii=False, default=str)
 
 
+def _is_empty(v) -> bool:
+    """Check if a value is empty/falsy, handling numpy arrays safely."""
+    if v is None:
+        return True
+    # numpy arrays can't be compared with == directly
+    try:
+        import numpy as np
+        if isinstance(v, np.ndarray):
+            return v.size == 0
+    except ImportError:
+        pass
+    if isinstance(v, (list, dict, str)):
+        return len(v) == 0
+    if isinstance(v, (int, float)):
+        try:
+            if math.isnan(v) or math.isinf(v):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return v == 0
+    return False
+
+
 def _strip_empty(obj):
-    """Recursively remove None, empty lists, empty dicts, and round floats."""
+    """Recursively remove None, empty lists, empty dicts, NaN, and round floats."""
     if isinstance(obj, dict):
-        return {
-            k: _strip_empty(v)
-            for k, v in obj.items()
-            if v is not None and v != [] and v != {} and v != "" and v != 0
-        }
+        cleaned = {}
+        for k, v in obj.items():
+            if _is_empty(v):
+                continue
+            cleaned_v = _strip_empty(v)
+            if not _is_empty(cleaned_v):
+                cleaned[k] = cleaned_v
+        return cleaned
     if isinstance(obj, list):
-        return [_strip_empty(item) for item in obj if item is not None]
+        return [_strip_empty(item) for item in obj if not _is_empty(item)]
     if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             return None
@@ -39,6 +65,17 @@ def _strip_empty(obj):
         if abs(obj) >= 1:
             return round(obj, max(0, 4 - len(str(int(abs(obj))))))
         return round(obj, 6)
+    # Convert numpy types to Python types for JSON serialization
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return _strip_empty(float(obj))
+        if isinstance(obj, np.ndarray):
+            return _strip_empty(obj.tolist())
+    except ImportError:
+        pass
     return obj
 
 
