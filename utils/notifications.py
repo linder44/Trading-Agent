@@ -22,4 +22,4 @@ class Notifier:
                 timeout=10,
             )
         except Exception as e:
-            logger.warning(f"Telegram notification failed: {e}")
+            logger.warning(f"Ошибка отправки уведомления в Telegram: {e}")

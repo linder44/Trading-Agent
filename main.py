@@ -45,14 +45,14 @@ class TradingAgent:
         self.mode = mode  # "paper", "demo", or "live"
 
         logger.info("=" * 60)
-        logger.info("  AUTONOMOUS AI TRADING AGENT v2.0")
-        logger.info(f"  Mode: {self.mode.upper()}")
+        logger.info("  АВТОНОМНЫЙ ИИ ТОРГОВЫЙ АГЕНТ v2.0")
+        logger.info(f"  Режим: {self.mode.upper()}")
         if self.mode == "paper":
-            logger.info(f"  Paper Balance: {config.paper.initial_balance} USDT")
+            logger.info(f"  Бумажный баланс: {config.paper.initial_balance} USDT")
         elif self.mode == "demo":
-            logger.info("  Bitget DEMO account (virtual money)")
-        logger.info(f"  Symbols: {config.trading.symbols}")
-        logger.info(f"  Interval: {config.trading.analysis_interval_minutes} min")
+            logger.info("  Демо-счёт Bitget (виртуальные деньги)")
+        logger.info(f"  Символы: {config.trading.symbols}")
+        logger.info(f"  Интервал: {config.trading.analysis_interval_minutes} мин")
         logger.info("=" * 60)
 
         # Core modules
@@ -71,12 +71,12 @@ class TradingAgent:
         self.news = NewsFetcher(config.news)
         self.social = SocialSentiment()
 
-        # Validate symbols against exchange
+        # Валидация символов на бирже
         self.symbols = self.exchange.validate_symbols(config.trading.symbols)
         if not self.symbols:
-            logger.error("No valid trading symbols found! Check your config.")
+            logger.error("Не найдено ни одного валидного символа! Проверь конфигурацию.")
             sys.exit(1)
-        logger.info(f"Active symbols: {self.symbols}")
+        logger.info(f"Активные символы: {self.symbols}")
 
         # Paper trading state
         self.paper_balance = config.paper.initial_balance
@@ -91,7 +91,7 @@ class TradingAgent:
     def run_cycle(self):
         """Run one full analysis and trading cycle."""
         logger.info("-" * 40)
-        logger.info(f"Starting analysis cycle at {datetime.now(timezone.utc).isoformat()}")
+        logger.info(f"Начинаем цикл анализа: {datetime.now(timezone.utc).isoformat()}")
 
         # Reset daily stats if new day
         today = datetime.now(timezone.utc).date()
@@ -114,14 +114,14 @@ class TradingAgent:
                 technical_data[symbol] = self.analyzer.multi_timeframe_analysis(ohlcv_dict, symbol)
                 ohlcv_cache[symbol] = ohlcv_dict
             except Exception as e:
-                logger.error(f"Failed to analyze {symbol}: {e}")
+                logger.error(f"Ошибка анализа {symbol}: {e}")
 
         if not technical_data:
-            logger.warning("No technical data available, skipping cycle")
+            logger.warning("Нет технических данных, пропускаем цикл")
             return
 
-        # 2. Candlestick patterns, Fibonacci, divergences
-        logger.info("Analyzing patterns, Fibonacci levels, divergences...")
+        # 2. Свечные паттерны, Фибоначчи, дивергенции
+        logger.info("Анализируем паттерны, уровни Фибоначчи, дивергенции...")
         pattern_data = {}
         for symbol, ohlcv_dict in ohlcv_cache.items():
             pattern_data[symbol] = {}
@@ -129,28 +129,28 @@ class TradingAgent:
                 df_with_indicators = self.analyzer.compute_indicators(df)
                 pattern_data[symbol][tf] = self.patterns.get_full_pattern_analysis(df_with_indicators)
 
-        # 2b. Quantitative / scientific analysis
-        logger.info("Running quantitative analysis (Hurst, Kalman, FFT, VaR, entropy)...")
+        # 2b. Количественный / научный анализ
+        logger.info("Запускаем количественный анализ (Хёрст, Калман, FFT, VaR, энтропия)...")
         quant_data = {}
         for symbol, ohlcv_dict in ohlcv_cache.items():
             quant_data[symbol] = {}
             for tf, df in ohlcv_dict.items():
                 quant_data[symbol][tf] = self.quant.full_quant_analysis(df)
 
-        # 3. On-chain and derivatives data
-        logger.info("Fetching on-chain data (funding rates, OI, whales)...")
+        # 3. Ончейн и деривативы
+        logger.info("Загружаем ончейн-данные (фандинг, OI, киты)...")
         onchain_data = self.onchain.get_full_onchain_data(self.exchange, self.symbols)
 
-        # 4. News and fundamental context
-        logger.info("Fetching news and market context...")
+        # 4. Новости и фундаментальный контекст
+        logger.info("Загружаем новости и рыночный контекст...")
         market_context = self.news.get_market_context()
 
-        # 5. Social sentiment
-        logger.info("Fetching social sentiment (Reddit, CryptoPanic)...")
+        # 5. Социальные настроения
+        logger.info("Загружаем социальные настроения (Reddit, CryptoPanic)...")
         social_data = self.social.get_full_social_data()
 
-        # 6. Market correlations (DXY, S&P500, BTC dominance)
-        logger.info("Fetching market correlations (DXY, VIX, S&P500)...")
+        # 6. Рыночные корреляции (DXY, S&P500, доминация BTC)
+        logger.info("Загружаем рыночные корреляции (DXY, VIX, S&P500)...")
         correlation_data = self.correlations.get_full_correlation_data(self.exchange)
 
         # 7. Get portfolio state
@@ -161,10 +161,10 @@ class TradingAgent:
 
         portfolio = self.risk.get_portfolio_summary()
 
-        logger.info(f"Balance: {balance:.2f} USDT | Positions: {portfolio['num_positions']}")
+        logger.info(f"Баланс: {balance:.2f} USDT | Позиции: {portfolio['num_positions']}")
 
-        # 8. Send EVERYTHING to Claude AI for decisions
-        logger.info("Sending data to Claude AI for analysis...")
+        # 8. Отправляем ВСЁ в Claude AI для принятия решений
+        logger.info("Отправляем данные в Claude AI для анализа...")
         decision = self.brain.analyze_and_decide(
             technical_data=technical_data,
             market_context=market_context,
@@ -177,8 +177,8 @@ class TradingAgent:
             quant_data=quant_data,
         )
 
-        logger.info(f"AI Outlook: {decision.get('market_outlook', 'N/A')}")
-        logger.info(f"Risk Level: {decision.get('risk_level', 'N/A')}")
+        logger.info(f"Прогноз ИИ: {decision.get('market_outlook', 'Н/Д')}")
+        logger.info(f"Уровень риска: {decision.get('risk_level', 'Н/Д')}")
 
         # 9. Execute decisions
         actions = decision.get("decisions", [])
@@ -194,11 +194,11 @@ class TradingAgent:
         params = decision.get("params", {})
 
         if confidence < 0.6 and action != "hold":
-            logger.info(f"Skipping {symbol} {action}: low confidence ({confidence})")
+            logger.info(f"Пропускаем {symbol} {action}: низкая уверенность ({confidence})")
             return
 
-        logger.info(f"{'[PAPER] ' if self.mode == 'paper' else ''}Executing: {action} {symbol} (confidence={confidence})")
-        logger.info(f"  Reason: {reason}")
+        logger.info(f"{'[БУМАГА] ' if self.mode == 'paper' else ''}Исполняем: {action} {symbol} (уверенность={confidence})")
+        logger.info(f"  Причина: {reason}")
 
         if self.mode == "paper":
             self._execute_paper(decision, balance)
@@ -228,7 +228,7 @@ class TradingAgent:
 
             can_open, msg = self.risk.can_open_position(symbol, balance)
             if not can_open:
-                logger.warning(f"[PAPER] Cannot open {symbol}: {msg}")
+                logger.warning(f"[БУМАГА] Не могу открыть {symbol}: {msg}")
                 return
 
             self.risk.register_position(symbol, side, price, amount, stop_loss, take_profit)
@@ -245,7 +245,7 @@ class TradingAgent:
                 "reason": reason,
             }
             self.paper_trades.append(trade)
-            logger.info(f"[PAPER] {action} {symbol} @ {price} | Amount: {amount:.6f} | SL: {stop_loss:.2f} | TP: {take_profit:.2f}")
+            logger.info(f"[БУМАГА] {action} {symbol} @ {price} | Объём: {amount:.6f} | SL: {stop_loss:.2f} | TP: {take_profit:.2f}")
 
         elif action == "close":
             if symbol in self.risk.positions:
@@ -261,15 +261,15 @@ class TradingAgent:
                     "reason": reason,
                 }
                 self.paper_trades.append(trade)
-                logger.info(f"[PAPER] Close {symbol} @ {price} | PnL: {pnl:+.2f} USDT | Balance: {self.paper_balance:.2f}")
+                logger.info(f"[БУМАГА] Закрытие {symbol} @ {price} | PnL: {pnl:+.2f} USDT | Баланс: {self.paper_balance:.2f}")
 
         elif action == "hold":
-            logger.info(f"[PAPER] Hold {symbol}: {reason}")
+            logger.info(f"[БУМАГА] Удержание {symbol}: {reason}")
 
         # Save paper trades to file
         self._save_paper_log()
 
-        msg = f"[PAPER] *{action.upper()}* {symbol}\nPrice: {price}\nConfidence: {confidence}\nReason: {reason}"
+        msg = f"[БУМАГА] *{action.upper()}* {symbol}\nЦена: {price}\nУверенность: {confidence}\nПричина: {reason}"
         self.notifier.send(msg)
 
     def _execute_live(self, decision: dict, balance: float):
@@ -316,16 +316,16 @@ class TradingAgent:
                     result = self.orders.place_limit_order(symbol, "sell", amount, limit_price)
 
             elif action == "hold":
-                logger.info(f"Holding {symbol}: {reason}")
+                logger.info(f"Удержание {symbol}: {reason}")
 
             if result:
-                msg = f"*{action.upper()}* {symbol}\nConfidence: {confidence}\nReason: {reason}\nDetails: {result}"
+                msg = f"*{action.upper()}* {symbol}\nУверенность: {confidence}\nПричина: {reason}\nДетали: {result}"
                 self.notifier.send(msg)
-                logger.info(f"Executed: {result}")
+                logger.info(f"Исполнено: {result}")
 
         except Exception as e:
-            logger.error(f"Failed to execute {action} for {symbol}: {e}")
-            self.notifier.send(f"ERROR executing {action} {symbol}: {e}")
+            logger.error(f"Ошибка исполнения {action} для {symbol}: {e}")
+            self.notifier.send(f"ОШИБКА исполнения {action} {symbol}: {e}")
 
     def _get_atr(self, symbol: str) -> float | None:
         """Get latest ATR value for a symbol."""
@@ -350,46 +350,46 @@ class TradingAgent:
 
     def run(self, once: bool = False):
         """Main loop."""
-        self.notifier.send(f"Trading Agent STARTED ({self.mode.upper()} mode)")
+        self.notifier.send(f"Торговый агент ЗАПУЩЕН (режим {self.mode.upper()})")
 
         if once:
             self.run_cycle()
-            logger.info("Single cycle complete. Exiting.")
+            logger.info("Один цикл завершён. Выходим.")
             return
 
         while True:
             try:
                 self.run_cycle()
             except KeyboardInterrupt:
-                logger.info("Shutting down gracefully...")
-                self.notifier.send(f"Trading Agent STOPPED ({self.mode.upper()} mode)")
+                logger.info("Плавное завершение работы...")
+                self.notifier.send(f"Торговый агент ОСТАНОВЛЕН (режим {self.mode.upper()})")
                 break
             except Exception as e:
-                logger.error(f"Cycle error: {e}")
-                self.notifier.send(f"Cycle ERROR: {e}")
+                logger.error(f"Ошибка цикла: {e}")
+                self.notifier.send(f"ОШИБКА цикла: {e}")
 
             wait_seconds = config.trading.analysis_interval_minutes * 60
-            logger.info(f"Next cycle in {config.trading.analysis_interval_minutes} minutes...")
+            logger.info(f"Следующий цикл через {config.trading.analysis_interval_minutes} мин...")
             time.sleep(wait_seconds)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AI Trading Agent")
-    parser.add_argument("--live", action="store_true", help="Run in live mode (real money!)")
-    parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
+    parser = argparse.ArgumentParser(description="ИИ Торговый Агент")
+    parser.add_argument("--live", action="store_true", help="Запуск в режиме live (реальные деньги!)")
+    parser.add_argument("--once", action="store_true", help="Выполнить один цикл и выйти")
     args = parser.parse_args()
 
     mode = "live" if args.live else TRADING_MODE
 
     if mode == "live":
         logger.warning("!" * 60)
-        logger.warning("  LIVE MODE - REAL MONEY AT RISK!")
-        logger.warning("  Press Ctrl+C within 5 seconds to cancel...")
+        logger.warning("  LIVE РЕЖИМ — РЕАЛЬНЫЕ ДЕНЬГИ ПОД УГРОЗОЙ!")
+        logger.warning("  Нажми Ctrl+C в течение 5 секунд для отмены...")
         logger.warning("!" * 60)
         try:
             time.sleep(5)
         except KeyboardInterrupt:
-            logger.info("Cancelled.")
+            logger.info("Отменено.")
             return
 
     agent = TradingAgent(mode=mode)

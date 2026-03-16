@@ -37,7 +37,7 @@ class RiskManager:
         risk_per_unit = abs(price - stop_loss_price)
 
         if risk_per_unit <= 0:
-            logger.warning("Invalid stop loss - too close to entry")
+            logger.warning("Невалидный стоп-лосс — слишком близко к входу")
             return 0.0
 
         # Position size = risk amount / risk per unit
@@ -51,16 +51,16 @@ class RiskManager:
     def can_open_position(self, symbol: str, balance: float) -> tuple[bool, str]:
         """Check if we can open a new position."""
         if symbol in self.positions:
-            return False, f"Already have open position in {symbol}"
+            return False, f"Уже есть открытая позиция по {symbol}"
 
         if len(self.positions) >= self.cfg.max_open_positions:
-            return False, f"Max open positions reached ({self.cfg.max_open_positions})"
+            return False, f"Достигнут максимум открытых позиций ({self.cfg.max_open_positions})"
 
         if self.daily_trades >= self.max_daily_trades:
-            return False, f"Max daily trades reached ({self.max_daily_trades})"
+            return False, f"Достигнут максимум дневных сделок ({self.max_daily_trades})"
 
         if self.daily_pnl < -(balance * self.max_daily_loss_pct):
-            return False, f"Daily loss limit reached ({self.max_daily_loss_pct*100}%)"
+            return False, f"Достигнут дневной лимит убытков ({self.max_daily_loss_pct*100}%)"
 
         return True, "OK"
 
@@ -104,7 +104,7 @@ class RiskManager:
         )
         self.positions[symbol] = pos
         self.daily_trades += 1
-        logger.info(f"Registered {side} position: {symbol} @ {entry_price}, SL={stop_loss}, TP={take_profit}")
+        logger.info(f"Зарегистрирована {side} позиция: {symbol} @ {entry_price}, SL={stop_loss}, TP={take_profit}")
         return pos
 
     def close_position(self, symbol: str, exit_price: float) -> float:
@@ -120,7 +120,7 @@ class RiskManager:
 
         self.daily_pnl += pnl
         del self.positions[symbol]
-        logger.info(f"Closed {pos.side} {symbol}: PnL={pnl:.2f} USDT")
+        logger.info(f"Закрыта {pos.side} {symbol}: PnL={pnl:.2f} USDT")
         return pnl
 
     def get_portfolio_summary(self) -> dict:
@@ -147,4 +147,4 @@ class RiskManager:
         """Reset daily counters (call at start of new day)."""
         self.daily_pnl = 0.0
         self.daily_trades = 0
-        logger.info("Daily risk stats reset")
+        logger.info("Дневная статистика риска сброшена")

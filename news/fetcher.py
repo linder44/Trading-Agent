@@ -58,7 +58,7 @@ class NewsFetcher:
             self._set_cache(cache_key, result)
             return result
         except Exception as e:
-            logger.warning(f"NewsAPI fetch failed: {e}")
+            logger.warning(f"Ошибка загрузки NewsAPI: {e}")
             return []
 
     def fetch_coingecko_trending(self) -> list[dict]:
@@ -83,7 +83,7 @@ class NewsFetcher:
             self._set_cache(cache_key, result)
             return result
         except Exception as e:
-            logger.warning(f"CoinGecko trending fetch failed: {e}")
+            logger.warning(f"Ошибка загрузки трендов CoinGecko: {e}")
             return []
 
     def fetch_fear_greed_index(self) -> dict:
@@ -104,7 +104,7 @@ class NewsFetcher:
             self._set_cache(cache_key, result)
             return result
         except Exception as e:
-            logger.warning(f"Fear & Greed fetch failed: {e}")
+            logger.warning(f"Ошибка загрузки индекса страха и жадности: {e}")
             return {"value": 50, "classification": "Neutral", "timestamp": ""}
 
     def get_market_context(self) -> dict:

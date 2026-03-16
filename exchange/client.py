@@ -46,8 +46,8 @@ class ExchangeClient:
 
         self._has_auth = bool(cfg.api_key)
         self._is_demo = cfg.demo
-        mode = "demo" if cfg.demo else ("auth" if self._has_auth else "public only")
-        logger.info(f"Exchange initialized (mode={mode})")
+        mode = "демо" if cfg.demo else ("авторизован" if self._has_auth else "только публичный")
+        logger.info(f"Биржа инициализирована (режим={mode})")
 
         # Pre-load markets so we can validate symbols later
         self.exchange.load_markets()
@@ -66,9 +66,9 @@ class ExchangeClient:
                 valid.append(s)
             elif swap_symbol in self.exchange.markets:
                 valid.append(swap_symbol)
-                logger.info(f"Mapped {s} -> {swap_symbol} (swap market)")
+                logger.info(f"Маппинг {s} -> {swap_symbol} (swap-рынок)")
             else:
-                logger.warning(f"Symbol {s} not available on exchange (demo={self._is_demo}), skipping")
+                logger.warning(f"Символ {s} недоступен на бирже (демо={self._is_demo}), пропускаем")
         return valid
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> pd.DataFrame:
@@ -114,14 +114,14 @@ class ExchangeClient:
         """Place a market order."""
         params = params or {}
         order = self.exchange.create_order(symbol, "market", side, amount, params=params)
-        logger.info(f"Market {side} {amount} {symbol} -> {order['id']}")
+        logger.info(f"Рыночный ордер {side} {amount} {symbol} -> {order['id']}")
         return order
 
     def create_limit_order(self, symbol: str, side: str, amount: float, price: float, params: dict | None = None) -> dict:
         """Place a limit order."""
         params = params or {}
         order = self.exchange.create_order(symbol, "limit", side, amount, price, params=params)
-        logger.info(f"Limit {side} {amount} {symbol} @ {price} -> {order['id']}")
+        logger.info(f"Лимитный ордер {side} {amount} {symbol} @ {price} -> {order['id']}")
         return order
 
     def create_stop_loss(self, symbol: str, side: str, amount: float, stop_price: float, params: dict | None = None) -> dict:
@@ -130,7 +130,7 @@ class ExchangeClient:
         params["stopPrice"] = stop_price
         params["triggerPrice"] = stop_price
         order = self.exchange.create_order(symbol, "market", side, amount, params=params)
-        logger.info(f"Stop-loss {side} {amount} {symbol} trigger @ {stop_price} -> {order['id']}")
+        logger.info(f"Стоп-лосс {side} {amount} {symbol} триггер @ {stop_price} -> {order['id']}")
         return order
 
     def create_take_profit(self, symbol: str, side: str, amount: float, tp_price: float, params: dict | None = None) -> dict:
@@ -139,13 +139,13 @@ class ExchangeClient:
         params["stopPrice"] = tp_price
         params["triggerPrice"] = tp_price
         order = self.exchange.create_order(symbol, "market", side, amount, params=params)
-        logger.info(f"Take-profit {side} {amount} {symbol} trigger @ {tp_price} -> {order['id']}")
+        logger.info(f"Тейк-профит {side} {amount} {symbol} триггер @ {tp_price} -> {order['id']}")
         return order
 
     def cancel_order(self, order_id: str, symbol: str) -> dict:
         """Cancel an order."""
         result = self.exchange.cancel_order(order_id, symbol)
-        logger.info(f"Cancelled order {order_id} on {symbol}")
+        logger.info(f"Отменён ордер {order_id} на {symbol}")
         return result
 
     def cancel_all_orders(self, symbol: str) -> list:
@@ -159,7 +159,7 @@ class ExchangeClient:
     def set_leverage(self, symbol: str, leverage: int) -> dict:
         """Set leverage for a symbol."""
         result = self.exchange.set_leverage(leverage, symbol)
-        logger.info(f"Set leverage {leverage}x for {symbol}")
+        logger.info(f"Установлено плечо {leverage}x для {symbol}")
         return result
 
     def get_market_info(self, symbol: str) -> dict:

@@ -52,14 +52,14 @@ class Backtester:
 
     def run(self):
         """Run the backtest."""
-        logger.info(f"Backtesting {self.symbol} | {self.days} days | {self.interval} interval")
-        logger.info(f"Initial balance: {self.initial_balance} USDT")
+        logger.info(f"Бэктест {self.symbol} | {self.days} дней | интервал {self.interval}")
+        logger.info(f"Начальный баланс: {self.initial_balance} USDT")
 
         # Fetch historical data
         candles_needed = self.days * (24 // self._interval_hours()) + 200  # +200 for indicator warmup
         candles_needed = min(candles_needed, 1000)
 
-        logger.info(f"Fetching {candles_needed} candles...")
+        logger.info(f"Загружаем {candles_needed} свечей...")
         df = self.exchange.fetch_ohlcv(self.symbol, self.interval, limit=candles_needed)
 
         # Compute indicators on full dataset
@@ -69,7 +69,7 @@ class Backtester:
         start_idx = 200
         analysis_points = range(start_idx, len(df), 6)  # Every 6 candles to save API costs
 
-        logger.info(f"Analyzing {len(list(analysis_points))} decision points...")
+        logger.info(f"Анализируем {len(list(analysis_points))} точек принятия решений...")
         analysis_points = range(start_idx, len(df), 6)  # Re-create generator
 
         for i in analysis_points:
@@ -120,7 +120,7 @@ class Backtester:
                         self._execute_backtest_decision(d, current_price, current_time)
 
             except Exception as e:
-                logger.warning(f"Decision failed at {current_time}: {e}")
+                logger.warning(f"Ошибка решения на {current_time}: {e}")
 
             # Track equity
             equity = self.balance
@@ -240,7 +240,7 @@ class Backtester:
         """Print backtest results."""
         total_trades = len(self.trades)
         if total_trades == 0:
-            logger.info("No trades executed during backtest.")
+            logger.info("За время бэктеста сделок не было.")
             return
 
         wins = [t for t in self.trades if t["pnl"] > 0]
@@ -260,18 +260,18 @@ class Backtester:
             max_drawdown = max(max_drawdown, dd)
 
         logger.info("=" * 50)
-        logger.info(f"  BACKTEST RESULTS: {self.symbol}")
-        logger.info(f"  Period: {self.days} days | Interval: {self.interval}")
+        logger.info(f"  РЕЗУЛЬТАТЫ БЭКТЕСТА: {self.symbol}")
+        logger.info(f"  Период: {self.days} дней | Интервал: {self.interval}")
         logger.info("=" * 50)
-        logger.info(f"  Initial Balance:  {self.initial_balance:.2f} USDT")
-        logger.info(f"  Final Balance:    {self.balance:.2f} USDT")
-        logger.info(f"  Total PnL:        {total_pnl:+.2f} USDT ({total_pnl/self.initial_balance*100:+.1f}%)")
-        logger.info(f"  Total Trades:     {total_trades}")
-        logger.info(f"  Win Rate:         {win_rate:.1f}%")
-        logger.info(f"  Avg Win:          {avg_win:+.2f} USDT")
-        logger.info(f"  Avg Loss:         {avg_loss:+.2f} USDT")
-        logger.info(f"  Profit Factor:    {profit_factor:.2f}")
-        logger.info(f"  Max Drawdown:     {max_drawdown:.1f}%")
+        logger.info(f"  Начальный баланс: {self.initial_balance:.2f} USDT")
+        logger.info(f"  Итоговый баланс:  {self.balance:.2f} USDT")
+        logger.info(f"  Общий PnL:        {total_pnl:+.2f} USDT ({total_pnl/self.initial_balance*100:+.1f}%)")
+        logger.info(f"  Всего сделок:     {total_trades}")
+        logger.info(f"  Винрейт:          {win_rate:.1f}%")
+        logger.info(f"  Средний профит:   {avg_win:+.2f} USDT")
+        logger.info(f"  Средний убыток:   {avg_loss:+.2f} USDT")
+        logger.info(f"  Профит-фактор:    {profit_factor:.2f}")
+        logger.info(f"  Макс. просадка:   {max_drawdown:.1f}%")
         logger.info("=" * 50)
 
     def _save_results(self):
@@ -290,14 +290,14 @@ class Backtester:
         }
         filename = f"data/backtest_{self.symbol.replace('/', '_')}_{self.days}d.json"
         Path(filename).write_text(json.dumps(results, indent=2))
-        logger.info(f"Results saved to {filename}")
+        logger.info(f"Результаты сохранены в {filename}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AI Trading Agent Backtester")
-    parser.add_argument("--symbol", default="BTC/USDT", help="Trading pair")
-    parser.add_argument("--days", type=int, default=30, help="Number of days to backtest")
-    parser.add_argument("--interval", default="4h", help="Candle interval (1h, 4h, 1d)")
+    parser = argparse.ArgumentParser(description="Бэктестер ИИ Торгового Агента")
+    parser.add_argument("--symbol", default="BTC/USDT", help="Торговая пара")
+    parser.add_argument("--days", type=int, default=30, help="Количество дней для бэктеста")
+    parser.add_argument("--interval", default="4h", help="Интервал свечей (1h, 4h, 1d)")
     args = parser.parse_args()
 
     backtester = Backtester(args.symbol, args.days, args.interval)

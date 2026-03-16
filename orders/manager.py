@@ -17,7 +17,7 @@ class OrderManager:
         """Open a long position with SL and TP."""
         can_open, reason = self.risk.can_open_position(symbol, balance)
         if not can_open:
-            logger.warning(f"Cannot open long {symbol}: {reason}")
+            logger.warning(f"Не могу открыть лонг {symbol}: {reason}")
             return None
 
         stop_loss = self.risk.compute_stop_loss(price, "long", atr)
@@ -25,7 +25,7 @@ class OrderManager:
         amount = self.risk.calculate_position_size(balance, price, stop_loss)
 
         if amount <= 0:
-            logger.warning(f"Position size too small for {symbol}")
+            logger.warning(f"Размер позиции слишком мал для {symbol}")
             return None
 
         # Round amount to market precision
@@ -63,14 +63,14 @@ class OrderManager:
             }
 
         except Exception as e:
-            logger.error(f"Failed to open long {symbol}: {e}")
+            logger.error(f"Ошибка открытия лонга {symbol}: {e}")
             return None
 
     def open_short(self, symbol: str, balance: float, price: float, atr: float | None = None) -> dict | None:
         """Open a short position with SL and TP."""
         can_open, reason = self.risk.can_open_position(symbol, balance)
         if not can_open:
-            logger.warning(f"Cannot open short {symbol}: {reason}")
+            logger.warning(f"Не могу открыть шорт {symbol}: {reason}")
             return None
 
         stop_loss = self.risk.compute_stop_loss(price, "short", atr)
@@ -111,13 +111,13 @@ class OrderManager:
             }
 
         except Exception as e:
-            logger.error(f"Failed to open short {symbol}: {e}")
+            logger.error(f"Ошибка открытия шорта {symbol}: {e}")
             return None
 
     def close_position(self, symbol: str) -> dict | None:
         """Close an existing position."""
         if symbol not in self.risk.positions:
-            logger.warning(f"No position to close for {symbol}")
+            logger.warning(f"Нет позиции для закрытия {symbol}")
             return None
 
         pos = self.risk.positions[symbol]
@@ -145,7 +145,7 @@ class OrderManager:
             }
 
         except Exception as e:
-            logger.error(f"Failed to close {symbol}: {e}")
+            logger.error(f"Ошибка закрытия {symbol}: {e}")
             return None
 
     def place_limit_order(self, symbol: str, side: str, amount: float, price: float) -> dict | None:
@@ -161,7 +161,7 @@ class OrderManager:
                 "order_id": order["id"],
             }
         except Exception as e:
-            logger.error(f"Failed to place limit order {symbol}: {e}")
+            logger.error(f"Ошибка размещения лимитного ордера {symbol}: {e}")
             return None
 
     def update_stop_loss(self, symbol: str, new_sl_price: float) -> dict | None:
@@ -186,12 +186,12 @@ class OrderManager:
             )
 
             pos.stop_loss = new_sl_price
-            logger.info(f"Updated SL for {symbol} to {new_sl_price}")
+            logger.info(f"Обновлён SL для {symbol} на {new_sl_price}")
 
             return {"action": "update_sl", "symbol": symbol, "new_stop_loss": new_sl_price}
 
         except Exception as e:
-            logger.error(f"Failed to update SL for {symbol}: {e}")
+            logger.error(f"Ошибка обновления SL для {symbol}: {e}")
             return None
 
     def sync_positions_from_exchange(self):
@@ -203,9 +203,9 @@ class OrderManager:
             # Remove closed positions from local tracking
             for symbol in list(self.risk.positions.keys()):
                 if symbol not in exchange_symbols:
-                    logger.info(f"Position {symbol} closed on exchange, removing from local tracking")
+                    logger.info(f"Позиция {symbol} закрыта на бирже, удаляем из локального отслеживания")
                     ticker = self.exchange.fetch_ticker(symbol)
                     self.risk.close_position(symbol, ticker["last"])
 
         except Exception as e:
-            logger.error(f"Failed to sync positions: {e}")
+            logger.error(f"Ошибка синхронизации позиций: {e}")
