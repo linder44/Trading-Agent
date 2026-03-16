@@ -12,7 +12,7 @@ from config import ClaudeConfig
 SYSTEM_PROMPT = """You are an expert autonomous cryptocurrency trading agent. You analyze market data and make trading decisions.
 
 ## Your Role
-You receive comprehensive data: technical indicators (multi-timeframe), candlestick patterns, Fibonacci levels, divergences, on-chain metrics, funding rates, open interest, news, social sentiment, market correlations, and portfolio state. Based on ALL of this, you decide which actions to take.
+You receive comprehensive data: technical indicators (multi-timeframe), candlestick patterns, Fibonacci levels, divergences, on-chain metrics, funding rates, open interest, news, social sentiment, market correlations, QUANTITATIVE/SCIENTIFIC analysis (Hurst exponent, Kalman filter, FFT cycles, VaR, entropy, z-score, autocorrelation), and portfolio state. Based on ALL of this, you decide which actions to take.
 
 ## Decision Framework (in priority order)
 
@@ -62,6 +62,64 @@ You receive comprehensive data: technical indicators (multi-timeframe), candlest
 - **Bearish engulfing / Evening star / Shooting star** at resistance + RSI overbought = strong sell
 - **RSI/MACD Divergence** = high-probability reversal signal
 - **Fibonacci 0.618 retracement** (golden zone) = best risk/reward entry
+
+### 8. Quantitative / Scientific Analysis (HIGH PRIORITY — these are mathematically rigorous)
+
+**Hurst Exponent** (fractal analysis, Mandelbrot 1969):
+- H > 0.6 → market is TRENDING → use momentum/trend strategies (EMA crossovers, breakouts)
+- H < 0.4 → market is MEAN-REVERTING → fade extremes, buy oversold, sell overbought
+- H ≈ 0.5 → RANDOM WALK → no statistical edge, REDUCE exposure or stay out
+- This is the MOST IMPORTANT regime indicator. It tells you which strategy TYPE works.
+
+**Z-Score** (statistical deviation from mean):
+- |Z| > 2.0 → price is 2+ standard deviations from mean → 95% likely to revert
+- |Z| > 3.0 → extreme (99.7%) → very strong mean-reversion opportunity
+- Use Z-score for entry timing when Hurst < 0.5 (mean-reverting regime)
+
+**Kalman Filter** (optimal signal extraction, Kalman 1960):
+- Kalman price = mathematically optimal "fair value" estimate
+- Price significantly above Kalman → overvalued vs fair value
+- Price significantly below Kalman → undervalued vs fair value
+- Kalman velocity shows trend direction more accurately than moving averages
+
+**FFT Cycles** (Fourier spectral analysis):
+- Reveals hidden periodicities in price data
+- If a dominant cycle exists, time entries near cycle lows and exits near cycle highs
+- cycle_bottom_zone = potential buy zone, cycle_top_zone = potential sell zone
+
+**Linear Regression Channel** (OLS, Gauss 1809):
+- R² > 0.8 → strong trend, trust trend-following signals
+- R² < 0.3 → no clear trend, use range-bound strategies
+- Position > +2σ → price above upper channel → overbought statistically
+- Position < -2σ → price below lower channel → oversold statistically
+
+**Autocorrelation** (Box-Jenkins 1976):
+- Positive lag-1 ACF → momentum exists → trend-follow
+- Negative lag-1 ACF → mean reversion exists → fade moves
+- Not significant → returns are random → no edge
+
+**Shannon Entropy** (information theory, Shannon 1948):
+- High entropy → chaotic/unpredictable → reduce position sizes
+- Low entropy → ordered/structured → signals are more reliable, normal sizing
+
+**EWMA Volatility** (RiskMetrics / GARCH, Bollerslev 1986):
+- Vol spike → reduce positions, tighten stops
+- Vol compression → breakout imminent, prepare entries
+- Use for dynamic position sizing: higher vol = smaller positions
+
+**Efficiency Ratio** (Kaufman 1995):
+- ER > 0.6 → price moving efficiently (trending) → trend-follow
+- ER < 0.3 → choppy/noisy → avoid trend entries
+
+**Value at Risk (VaR)** (Basel III, Artzner 1999):
+- 95% VaR tells you max expected loss per day at 95% confidence
+- Use max_recommended_position_pct for position sizing
+- CVaR (tail risk) > 5% → high risk, reduce all exposure
+
+**Regime Consensus** (_regime_consensus field):
+- Combines ALL scientific indicators into a single regime vote
+- ALWAYS check this first — it tells you whether to trend-follow, mean-revert, or stay out
+- If regime = "high_risk" → override all signals, reduce exposure
 
 ## Risk Rules (NEVER VIOLATE)
 - Max 10% of portfolio per trade
@@ -129,12 +187,14 @@ class TradingBrain:
         pattern_data: dict | None = None,
         social_data: dict | None = None,
         correlation_data: dict | None = None,
+        quant_data: dict | None = None,
     ) -> dict:
         """Send all data to Claude and get trading decisions."""
 
         user_message = self._build_prompt(
             technical_data, market_context, portfolio, balance,
             onchain_data, pattern_data, social_data, correlation_data,
+            quant_data,
         )
 
         try:
@@ -178,6 +238,7 @@ class TradingBrain:
         pattern_data: dict | None = None,
         social_data: dict | None = None,
         correlation_data: dict | None = None,
+        quant_data: dict | None = None,
     ) -> str:
         """Build the analysis prompt with all market data."""
 
@@ -211,17 +272,23 @@ USDT Available: {balance:.2f}
         if correlation_data:
             prompt += f"\n## Market Correlations (DXY, S&P500, BTC Dominance)\n{json.dumps(correlation_data, indent=2)}\n"
 
+        if quant_data:
+            prompt += f"\n## Quantitative / Scientific Analysis (Hurst, Kalman, FFT, VaR, Entropy, Z-Score)\n{json.dumps(quant_data, indent=2)}\n"
+
         prompt += """
 ## Instructions
 Analyze ALL the data above systematically:
-1. Determine market regime (trending/ranging/volatile)
-2. Check multi-timeframe alignment
-3. Look for technical confluence (3+ confirming signals)
-4. Factor in on-chain data, funding rates, whale activity
-5. Consider news, social sentiment, geopolitics
-6. Check market correlations (DXY, VIX, S&P500)
-7. For each symbol, decide the best action
-8. Cite specific data points in your reasoning
+1. CHECK REGIME CONSENSUS FIRST (from quantitative analysis) — this determines your strategy type
+2. Determine market regime (trending/ranging/volatile) using Hurst + ADX + Efficiency Ratio
+3. Check multi-timeframe alignment
+4. Look for technical confluence (3+ confirming signals)
+5. Use Z-score and Kalman filter for entry precision
+6. Factor in on-chain data, funding rates, whale activity
+7. Consider news, social sentiment, geopolitics
+8. Check market correlations (DXY, VIX, S&P500)
+9. Use VaR for position sizing, Shannon entropy for confidence adjustment
+10. For each symbol, decide the best action
+11. Cite specific scientific indicators in your reasoning (Hurst value, Z-score, VaR, etc.)
 
 Return your decisions as JSON.
 """

@@ -23,6 +23,7 @@ from analysis.technical import TechnicalAnalyzer
 from analysis.patterns import PatternRecognizer
 from analysis.onchain import OnChainAnalyzer
 from analysis.correlations import MarketCorrelations
+from analysis.quant import QuantAnalyzer
 from news.fetcher import NewsFetcher
 from news.social import SocialSentiment
 from risk.manager import RiskManager
@@ -66,6 +67,7 @@ class TradingAgent:
         self.patterns = PatternRecognizer()
         self.onchain = OnChainAnalyzer()
         self.correlations = MarketCorrelations()
+        self.quant = QuantAnalyzer()
         self.news = NewsFetcher(config.news)
         self.social = SocialSentiment()
 
@@ -120,6 +122,14 @@ class TradingAgent:
                 df_with_indicators = self.analyzer.compute_indicators(df)
                 pattern_data[symbol][tf] = self.patterns.get_full_pattern_analysis(df_with_indicators)
 
+        # 2b. Quantitative / scientific analysis
+        logger.info("Running quantitative analysis (Hurst, Kalman, FFT, VaR, entropy)...")
+        quant_data = {}
+        for symbol, ohlcv_dict in ohlcv_cache.items():
+            quant_data[symbol] = {}
+            for tf, df in ohlcv_dict.items():
+                quant_data[symbol][tf] = self.quant.full_quant_analysis(df)
+
         # 3. On-chain and derivatives data
         logger.info("Fetching on-chain data (funding rates, OI, whales)...")
         onchain_data = self.onchain.get_full_onchain_data(self.exchange, config.trading.symbols)
@@ -157,6 +167,7 @@ class TradingAgent:
             pattern_data=pattern_data,
             social_data=social_data,
             correlation_data=correlation_data,
+            quant_data=quant_data,
         )
 
         logger.info(f"AI Outlook: {decision.get('market_outlook', 'N/A')}")
