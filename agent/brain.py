@@ -1,6 +1,7 @@
 """AI Trading Brain - Claude-powered decision engine."""
 
 import json
+import math
 import re
 from datetime import datetime
 
@@ -8,6 +9,37 @@ import anthropic
 from loguru import logger
 
 from config import ClaudeConfig
+
+
+def _compact_json(data, indent: int | None = None) -> str:
+    """Serialize data to compact JSON, stripping noise.
+
+    - Rounds floats to 4 significant digits (saves ~30% tokens)
+    - Removes keys with None/null/empty values
+    - Removes redundant whitespace
+    """
+    cleaned = _strip_empty(data)
+    return json.dumps(cleaned, indent=indent, ensure_ascii=False, default=str)
+
+
+def _strip_empty(obj):
+    """Recursively remove None, empty lists, empty dicts, and round floats."""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_empty(v)
+            for k, v in obj.items()
+            if v is not None and v != [] and v != {} and v != "" and v != 0
+        }
+    if isinstance(obj, list):
+        return [_strip_empty(item) for item in obj if item is not None]
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        # Keep 4 significant digits: 83412.12345 -> 83410.0, 0.001234 -> 0.001234
+        if abs(obj) >= 1:
+            return round(obj, max(0, 4 - len(str(int(abs(obj))))))
+        return round(obj, 6)
+    return obj
 
 
 def _repair_truncated_json(raw: str) -> dict | None:
@@ -244,6 +276,11 @@ class TradingBrain:
             quant_data,
         )
 
+        # Log prompt size for monitoring
+        prompt_chars = len(SYSTEM_PROMPT) + len(user_message)
+        prompt_tokens_est = prompt_chars // 3  # ~3 chars per token for JSON-heavy text
+        logger.info(f"Размер промпта: ~{prompt_chars:,} символов (~{prompt_tokens_est:,} токенов)")
+
         try:
             response = self.client.messages.create(
                 model=self.model,
@@ -252,6 +289,10 @@ class TradingBrain:
                 messages=[{"role": "user", "content": user_message}],
                 temperature=0.2,
             )
+
+            # Log actual token usage from API response
+            usage = response.usage
+            logger.info(f"Использовано токенов: вход={usage.input_tokens:,}, выход={usage.output_tokens:,}")
 
             raw_text = response.content[0].text.strip()
 
@@ -301,31 +342,31 @@ class TradingBrain:
 USDT Available: {balance:.2f}
 
 ## Portfolio State
-{json.dumps(portfolio, indent=2)}
+{_compact_json(portfolio, indent=1)}
 
 ## Technical Analysis (Multi-Timeframe)
 """
         for symbol, timeframes in technical_data.items():
             prompt += f"\n### {symbol}\n"
             for tf, data in timeframes.items():
-                prompt += f"\n**{tf} Timeframe:**\n{json.dumps(data, indent=2)}\n"
+                prompt += f"**{tf}:** {_compact_json(data)}\n"
 
         if pattern_data:
-            prompt += f"\n## Candlestick Patterns, Fibonacci & Divergences\n{json.dumps(pattern_data, indent=2)}\n"
+            prompt += f"\n## Candlestick Patterns, Fibonacci & Divergences\n{_compact_json(pattern_data)}\n"
 
         if onchain_data:
-            prompt += f"\n## On-Chain & Derivatives Data\n{json.dumps(onchain_data, indent=2)}\n"
+            prompt += f"\n## On-Chain & Derivatives Data\n{_compact_json(onchain_data)}\n"
 
-        prompt += f"\n## News & Fundamental Context\n{json.dumps(market_context, indent=2)}\n"
+        prompt += f"\n## News & Fundamental Context\n{_compact_json(market_context, indent=1)}\n"
 
         if social_data:
-            prompt += f"\n## Social Trends & Sector Rotation\n{json.dumps(social_data, indent=2)}\n"
+            prompt += f"\n## Social Trends & Sector Rotation\n{_compact_json(social_data, indent=1)}\n"
 
         if correlation_data:
-            prompt += f"\n## Market Correlations (BTC Dominance, Stablecoins)\n{json.dumps(correlation_data, indent=2)}\n"
+            prompt += f"\n## Market Correlations (BTC Dominance, Stablecoins)\n{_compact_json(correlation_data, indent=1)}\n"
 
         if quant_data:
-            prompt += f"\n## Quantitative / Scientific Analysis (Hurst, Kalman, FFT, VaR, Entropy, Z-Score)\n{json.dumps(quant_data, indent=2)}\n"
+            prompt += f"\n## Quantitative / Scientific Analysis (Hurst, Kalman, FFT, VaR, Entropy, Z-Score)\n{_compact_json(quant_data)}\n"
 
         # Report missing/empty data sources so Claude knows what's unavailable
         missing = self._detect_missing_data(
