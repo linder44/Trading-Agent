@@ -134,39 +134,13 @@ class MarketCorrelations:
         self._set_cache(cache_key, result)
         return result
 
-    def get_eth_btc_ratio(self, exchange_client) -> dict:
-        """Get ETH/BTC ratio - indicates altcoin strength.
-
-        Computed from ETH/USDT and BTC/USDT since ETH/BTC pair may not exist on swap.
-        """
-        try:
-            eth_ticker = exchange_client.fetch_ticker("ETH/USDT:USDT")
-            btc_ticker = exchange_client.fetch_ticker("BTC/USDT:USDT")
-            eth_price = eth_ticker["last"]
-            btc_price = btc_ticker["last"]
-            if btc_price and btc_price > 0:
-                price = eth_price / btc_price
-                return {
-                    "eth_btc_ratio": round(price, 6),
-                    "signal": "alts_strong" if price > 0.05 else (
-                        "alts_weak" if price < 0.03 else "neutral"
-                    ),
-                }
-        except Exception as e:
-            logger.warning(f"ETH/BTC ratio fetch failed: {e}")
-        return {"eth_btc_ratio": 0, "signal": "unknown"}
-
     def get_full_correlation_data(self, exchange_client=None) -> dict:
         """Get all market correlation data."""
         data = {
             "btc_dominance": self.get_btc_dominance(),
             "traditional_markets": self.get_dxy_and_tradfi(),
+            "fetched_at": datetime.utcnow().isoformat(),
         }
-
-        if exchange_client:
-            data["eth_btc_ratio"] = self.get_eth_btc_ratio(exchange_client)
-
-        data["fetched_at"] = datetime.utcnow().isoformat()
         return data
 
     def _is_cached(self, key: str) -> bool:
