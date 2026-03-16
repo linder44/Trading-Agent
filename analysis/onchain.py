@@ -3,8 +3,8 @@
 Fetches data that is not available from standard OHLCV:
 - Funding rates (sentiment of futures traders)
 - Open interest (how much money is in the market)
-- Liquidations (forced closures, cascade potential)
-- Whale alerts (large transactions)
+- Long/short ratio (positioning of accounts)
+- Whale alerts (large transactions via Blockchain.com)
 - Exchange inflows/outflows (selling/buying pressure)
 """
 
@@ -65,33 +65,37 @@ class OnChainAnalyzer:
             return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
-        """Get long/short ratio from exchange.
+        """Get long/short ratio using Bitget public API directly.
 
         Ratio > 1 = more longs than shorts
         Extreme ratios often signal reversals (contrarian indicator)
         """
-        # Try CoinGlass public API first (more reliable than ccxt for this)
         base_coin = symbol.split("/")[0]
         cache_key = f"ls_ratio_{base_coin}"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
+        # Bitget public API — no auth required
         try:
             resp = requests.get(
-                "https://open-api.coinglass.com/public/v2/indicator/top_long_short_account_ratio",
-                params={"symbol": base_coin, "time_type": "h4"},
-                timeout=10,
+                "https://api.bitget.com/api/v2/mix/market/account-long-short",
+                params={
+                    "symbol": f"{base_coin}USDT",
+                    "period": "5m",
+                    "productType": "USDT-FUTURES",
+                },
+                timeout=8,
             )
             if resp.status_code == 200:
                 api_data = resp.json().get("data", [])
                 if api_data:
                     latest = api_data[-1] if isinstance(api_data, list) else api_data
-                    long_pct = float(latest.get("longAccount", 0.5))
-                    short_pct = float(latest.get("shortAccount", 0.5))
-                    ratio = long_pct / short_pct if short_pct > 0 else 1.0
+                    long_ratio = float(latest.get("longAccountRatio", 0.5))
+                    short_ratio = float(latest.get("shortAccountRatio", 0.5))
+                    ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
                     result = {
-                        "long_pct": round(long_pct * 100, 1),
-                        "short_pct": round(short_pct * 100, 1),
+                        "long_pct": round(long_ratio * 100, 1),
+                        "short_pct": round(short_ratio * 100, 1),
                         "ratio": round(ratio, 2),
                         "signal": "contrarian_bearish" if ratio > 2.0 else (
                             "contrarian_bullish" if ratio < 0.5 else "neutral"
@@ -99,98 +103,88 @@ class OnChainAnalyzer:
                     }
                     self._set_cache(cache_key, result)
                     return result
+            else:
+                logger.warning(f"Bitget long/short API returned {resp.status_code} for {base_coin}")
         except Exception as e:
-            logger.warning(f"Long/short ratio (CoinGlass) fetch failed for {base_coin}: {e}")
-
-        # Fallback: try ccxt
-        try:
-            ratio_data = exchange_client.exchange.fetch_long_short_ratio_history(symbol, limit=1)
-            if ratio_data:
-                latest = ratio_data[-1]
-                long_pct = float(latest.get("longAccount") or 0.5)
-                short_pct = float(latest.get("shortAccount") or 0.5)
-                ratio = long_pct / short_pct if short_pct > 0 else 1.0
-                return {
-                    "long_pct": round(long_pct * 100, 1),
-                    "short_pct": round(short_pct * 100, 1),
-                    "ratio": round(ratio, 2),
-                    "signal": "contrarian_bearish" if ratio > 2.0 else (
-                        "contrarian_bullish" if ratio < 0.5 else "neutral"
-                    ),
-                }
-        except Exception as e:
-            logger.warning(f"Long/short ratio (ccxt) fetch failed for {symbol}: {e}")
+            logger.warning(f"Long/short ratio fetch failed for {base_coin}: {e}")
 
         return {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 
     def get_whale_alerts(self) -> list[dict]:
-        """Fetch recent large crypto transactions from Whale Alert (free tier)."""
+        """Detect large BTC transactions via Blockchain.com (free, no API key).
+
+        Looks at recent unconfirmed transactions > threshold.
+        """
         cache_key = "whale_alerts"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
         try:
-            # Whale Alert free API - last large transactions
+            # Blockchain.com — free, no auth, gives recent large unconfirmed txs
             resp = requests.get(
-                "https://api.whale-alert.io/v1/transactions",
-                params={
-                    "api_key": "free",  # Free tier
-                    "min_value": 1000000,  # $1M+
-                    "limit": 10,
-                },
-                timeout=10,
+                "https://blockchain.info/unconfirmed-transactions?format=json",
+                timeout=8,
             )
             if resp.status_code == 200:
-                txs = resp.json().get("transactions", [])
-                result = [
-                    {
-                        "symbol": tx.get("symbol", "").upper(),
-                        "amount_usd": tx.get("amount_usd", 0),
-                        "from": tx.get("from", {}).get("owner_type", "unknown"),
-                        "to": tx.get("to", {}).get("owner_type", "unknown"),
-                        "type": self._classify_whale_tx(tx),
-                    }
-                    for tx in txs
-                ]
-                self._set_cache(cache_key, result)
-                return result
+                txs = resp.json().get("txs", [])
+                large_txs = []
+                for tx in txs:
+                    # Calculate total output value in BTC
+                    total_btc = sum(o.get("value", 0) for o in tx.get("out", [])) / 1e8
+                    if total_btc >= 10:  # 10+ BTC transactions
+                        has_exchange_input = any(
+                            inp.get("prev_out", {}).get("addr", "").startswith("bc1q")
+                            or inp.get("prev_out", {}).get("addr", "").startswith("3")
+                            for inp in tx.get("inputs", [])
+                        )
+                        large_txs.append({
+                            "symbol": "BTC",
+                            "amount_btc": round(total_btc, 2),
+                            "num_outputs": len(tx.get("out", [])),
+                            "type": "large_transfer",
+                        })
+                    if len(large_txs) >= 10:
+                        break
+
+                self._set_cache(cache_key, large_txs)
+                return large_txs
         except Exception as e:
             logger.warning(f"Whale alert fetch failed: {e}")
 
         return []
 
-    def get_exchange_netflow(self) -> dict:
-        """Get exchange net flow data from CryptoQuant (public endpoints).
+    def get_exchange_netflow(self, exchange_client) -> dict:
+        """Estimate exchange flow direction from order book imbalance.
 
-        Inflow to exchanges = selling pressure (bearish)
-        Outflow from exchanges = accumulation (bullish)
+        Uses bid/ask volume ratio as a proxy for flow direction:
+        - More bids than asks = accumulation (buying pressure)
+        - More asks than bids = selling pressure
         """
         cache_key = "exchange_netflow"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
         try:
-            # CoinGlass public API for exchange flow
-            resp = requests.get(
-                "https://open-api.coinglass.com/public/v2/indicator/exchange_netflow",
-                params={"symbol": "BTC", "time_type": "h4"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json().get("data", [])
-                if data:
-                    latest = data[-1] if isinstance(data, list) else data
-                    netflow = float(latest.get("value", 0))
-                    result = {
-                        "btc_netflow": netflow,
-                        "signal": "selling_pressure" if netflow > 0 else "accumulation",
-                    }
-                    self._set_cache(cache_key, result)
-                    return result
+            ob = exchange_client.exchange.fetch_order_book("BTC/USDT:USDT", limit=50)
+            bid_volume = sum(b[1] for b in ob.get("bids", []))
+            ask_volume = sum(a[1] for a in ob.get("asks", []))
+            total = bid_volume + ask_volume
+            if total > 0:
+                bid_ratio = bid_volume / total
+                result = {
+                    "bid_volume_btc": round(bid_volume, 2),
+                    "ask_volume_btc": round(ask_volume, 2),
+                    "bid_ratio": round(bid_ratio, 3),
+                    "signal": "accumulation" if bid_ratio > 0.55 else (
+                        "selling_pressure" if bid_ratio < 0.45 else "balanced"
+                    ),
+                }
+                self._set_cache(cache_key, result)
+                return result
         except Exception as e:
-            logger.warning(f"Exchange netflow fetch failed: {e}")
+            logger.warning(f"Exchange netflow (order book) fetch failed: {e}")
 
-        return {"btc_netflow": 0, "signal": "unknown"}
+        return {"bid_volume_btc": 0, "ask_volume_btc": 0, "bid_ratio": 0.5, "signal": "unknown"}
 
     def get_full_onchain_data(self, exchange_client, symbols: list[str]) -> dict:
         """Get all on-chain/derivatives data for all symbols."""
@@ -204,24 +198,10 @@ class OnChainAnalyzer:
 
         result["_market_wide"] = {
             "whale_alerts": self.get_whale_alerts(),
-            "exchange_netflow": self.get_exchange_netflow(),
+            "exchange_netflow": self.get_exchange_netflow(exchange_client),
         }
 
         return result
-
-    def _classify_whale_tx(self, tx: dict) -> str:
-        """Classify whale transaction type."""
-        from_type = tx.get("from", {}).get("owner_type", "")
-        to_type = tx.get("to", {}).get("owner_type", "")
-
-        if from_type == "exchange" and to_type == "unknown":
-            return "exchange_withdrawal (bullish)"
-        elif from_type == "unknown" and to_type == "exchange":
-            return "exchange_deposit (bearish)"
-        elif from_type == "exchange" and to_type == "exchange":
-            return "exchange_transfer (neutral)"
-        else:
-            return "wallet_transfer (neutral)"
 
     def _is_cached(self, key: str) -> bool:
         if key in self._cache:

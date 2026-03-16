@@ -89,10 +89,9 @@ SYSTEM_PROMPT = """Ты — экспертный автономный агент
 - **Геополитика**: Войны, санкции, тарифы = risk-off → медвежий. Мир, торговые сделки = risk-on → бычий.
 
 ### 6. Рыночные корреляции
-- **DXY (Доллар)**: Сильный доллар = медвежий для крипты. Слабый доллар = бычий.
-- **S&P 500**: Индикатор risk-on/off. Корреляция с BTC значительна.
-- **VIX**: Высокий VIX (>25) = сокращай всю экспозицию. Низкий VIX = самоуспокоенность, тоже осторожно.
 - **Доминация BTC**: Растёт = альтсезон заканчивается, держись BTC. Падает = альты обгоняют.
+- **Стейблкоины (USDT/USDC)**: Растущий маркеткап = капитал ждёт входа (бычий). Падающий = отток из крипты (медвежий).
+- **Изменение маркеткапа крипто за 24ч**: Быстрый рост/падение = ускорение тренда.
 
 ### 7. Входы по паттернам
 - **Бычье поглощение / Утренняя звезда / Молот** на поддержке + RSI перепродан = сильный сигнал на покупку
@@ -168,7 +167,7 @@ SYSTEM_PROMPT = """Ты — экспертный автономный агент
 - RSI > 80 = НЕ открывай новые лонги. RSI < 20 = НЕ открывай новые шорты.
 - Никогда не гонись за пампом/дампом, который уже сделал >5% за последний час
 - Если ставка финансирования экстремальная И цена на сопротивлении → избегай лонгов
-- Если VIX > 30 или крупная геополитическая эскалация → сокращай все позиции до 50%
+- При крупной геополитической эскалации → сокращай все позиции до 50%
 
 ## Правила дивергенций (высокоприоритетные сигналы)
 - Бычья дивергенция RSI на поддержке Фибо 0.618 = СИЛЬНЫЙ сигнал на покупку
@@ -322,7 +321,7 @@ USDT Available: {balance:.2f}
             prompt += f"\n## Social Sentiment (Reddit, CryptoPanic)\n{json.dumps(social_data, indent=2)}\n"
 
         if correlation_data:
-            prompt += f"\n## Market Correlations (DXY, S&P500, BTC Dominance)\n{json.dumps(correlation_data, indent=2)}\n"
+            prompt += f"\n## Market Correlations (BTC Dominance, Stablecoins)\n{json.dumps(correlation_data, indent=2)}\n"
 
         if quant_data:
             prompt += f"\n## Quantitative / Scientific Analysis (Hurst, Kalman, FFT, VaR, Entropy, Z-Score)\n{json.dumps(quant_data, indent=2)}\n"
@@ -348,7 +347,7 @@ Analyze ALL the data above systematically:
 5. Use Z-score and Kalman filter for entry precision
 6. Factor in on-chain data, funding rates, whale activity
 7. Consider news, social sentiment, geopolitics
-8. Check market correlations (DXY, VIX, S&P500)
+8. Check market correlations (BTC Dominance, stablecoin flows)
 9. Use VaR for position sizing, Shannon entropy for confidence adjustment
 10. For each symbol, decide the best action
 11. Cite specific scientific indicators in your reasoning (Hurst value, Z-score, VaR, etc.)
@@ -401,15 +400,10 @@ Return your decisions as JSON.
         if not correlation_data:
             missing.append("Рыночные корреляции — полностью недоступны")
         else:
-            tradfi = correlation_data.get("traditional_markets", {})
-            if "DXY" not in tradfi:
-                missing.append("DXY (индекс доллара)")
-            if "VIX" not in tradfi:
-                missing.append("VIX (индекс страха)")
-            if "SPY" not in tradfi:
-                missing.append("S&P 500")
             if correlation_data.get("btc_dominance", {}).get("btc_dominance", 0) == 0:
                 missing.append("BTC Dominance")
+            if not correlation_data.get("stablecoin_market"):
+                missing.append("Стейблкоин маркеткап (USDT/USDC)")
 
         if not quant_data:
             missing.append("Количественный анализ (Хёрст, Калман, FFT, VaR) — полностью недоступен")

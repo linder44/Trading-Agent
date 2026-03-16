@@ -151,7 +151,7 @@ class TradingAgent:
 
         # 6. Рыночные корреляции (DXY, S&P500, доминация BTC)
         logger.info("Загружаем рыночные корреляции (DXY, VIX, S&P500)...")
-        correlation_data = self.correlations.get_full_correlation_data(self.exchange)
+        correlation_data = self.correlations.get_full_correlation_data()
 
         # 7. Get portfolio state
         if self.mode in ("demo", "live"):
@@ -235,16 +235,11 @@ class TradingAgent:
 
         # Correlations
         if correlation_data:
-            tradfi = correlation_data.get("traditional_markets", {})
-            sources["dxy"] = "DXY" in tradfi
-            sources["vix"] = "VIX" in tradfi
-            sources["sp500"] = "SPY" in tradfi
             sources["btc_dominance"] = correlation_data.get("btc_dominance", {}).get("btc_dominance", 0) > 0
+            sources["stablecoin_market"] = bool(correlation_data.get("stablecoin_market"))
         else:
-            sources["dxy"] = False
-            sources["vix"] = False
-            sources["sp500"] = False
             sources["btc_dominance"] = False
+            sources["stablecoin_market"] = False
 
         # Log summary
         loaded = []

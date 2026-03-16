@@ -2,10 +2,8 @@
 
 Tracks assets correlated with crypto to provide broader market context:
 - BTC Dominance: % of total crypto market cap that is Bitcoin
-- DXY (Dollar Index): strong dollar = bearish for crypto
-- S&P 500: risk-on/risk-off correlation
-- Gold: safe haven correlation
-- US Treasury yields: rising yields = bearish for risk assets
+- Stablecoin market cap: proxy for capital in crypto
+- Total crypto market cap change: overall market direction
 """
 
 import time
@@ -23,7 +21,7 @@ class MarketCorrelations:
         self._cache_ttl = 600  # 10 min
 
     def get_btc_dominance(self) -> dict:
-        """Get BTC dominance from CoinGecko.
+        """Get BTC dominance and global market data from CoinGecko.
 
         Rising dominance = altcoins underperforming (alt season ending)
         Falling dominance = altcoins outperforming (alt season)
@@ -47,6 +45,7 @@ class MarketCorrelations:
                 "total_market_cap_usd": data.get("total_market_cap", {}).get("usd", 0),
                 "total_volume_24h_usd": data.get("total_volume", {}).get("usd", 0),
                 "market_cap_change_24h": round(data.get("market_cap_change_percentage_24h_usd", 0), 2),
+                "active_cryptocurrencies": data.get("active_cryptocurrencies", 0),
                 "signal": "alt_season" if market_cap_pct.get("btc", 50) < 40 else (
                     "btc_dominant" if market_cap_pct.get("btc", 50) > 60 else "balanced"
                 ),
@@ -58,87 +57,56 @@ class MarketCorrelations:
             logger.warning(f"BTC dominance fetch failed: {e}")
             return {"btc_dominance": 0, "signal": "unknown"}
 
-    def get_dxy_and_tradfi(self) -> dict:
-        """Get traditional finance data (DXY, S&P500, Gold, Treasury yields).
+    def get_stablecoin_market(self) -> dict:
+        """Get stablecoin market data from CoinGecko.
 
-        Uses free Yahoo Finance alternative endpoints.
+        Growing stablecoin mcap = capital waiting on sidelines (bullish potential).
+        Shrinking stablecoin mcap = capital leaving crypto (bearish).
         """
-        cache_key = "tradfi"
+        cache_key = "stablecoin_market"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        result = {}
-
-        # Fetch from multiple sources
-        symbols = {
-            "DXY": "Dollar Index",
-            "SPY": "S&P 500 ETF",
-            "GLD": "Gold ETF",
-            "TLT": "20Y Treasury Bond ETF",
-            "VIX": "Volatility Index (Fear gauge)",
-        }
-
-        # Use Yahoo Finance crumb-free endpoint with longer timeout
-        yahoo_hosts = [
-            "https://query2.finance.yahoo.com",
-            "https://query1.finance.yahoo.com",
-        ]
-        for symbol, name in symbols.items():
-            fetched = False
-            for host in yahoo_hosts:
-                if fetched:
-                    break
-                try:
-                    resp = requests.get(
-                        f"{host}/v8/finance/chart/{symbol}",
-                        params={"range": "5d", "interval": "1d"},
-                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                        timeout=15,
-                    )
-                    if resp.status_code == 200:
-                        chart = resp.json().get("chart", {}).get("result", [{}])[0]
-                        meta = chart.get("meta", {})
-                        price = meta.get("regularMarketPrice", 0)
-                        prev_close = meta.get("chartPreviousClose", price)
-                        change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
-
-                        result[symbol] = {
-                            "name": name,
-                            "price": round(price, 2),
-                            "change_pct": round(change_pct, 2),
-                        }
-                        fetched = True
-                except Exception as e:
-                    logger.warning(f"Failed to fetch {symbol} from {host}: {e}")
-                    continue
-
-        # Add interpretations
-        if "DXY" in result:
-            dxy_change = result["DXY"]["change_pct"]
-            result["dxy_impact"] = "bearish_for_crypto" if dxy_change > 0.3 else (
-                "bullish_for_crypto" if dxy_change < -0.3 else "neutral"
+        try:
+            # Get USDT and USDC data as stablecoin proxies
+            resp = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": "tether,usd-coin",
+                    "vs_currencies": "usd",
+                    "include_market_cap": "true",
+                    "include_24hr_vol": "true",
+                    "include_24hr_change": "true",
+                },
+                timeout=10,
             )
+            if resp.status_code == 200:
+                data = resp.json()
+                usdt = data.get("tether", {})
+                usdc = data.get("usd-coin", {})
 
-        if "VIX" in result:
-            vix_price = result["VIX"]["price"]
-            result["market_fear"] = "extreme_fear" if vix_price > 30 else (
-                "elevated_fear" if vix_price > 20 else "low_fear_complacency"
-            )
+                usdt_mcap = usdt.get("usd_market_cap", 0)
+                usdc_mcap = usdc.get("usd_market_cap", 0)
+                total_stable_mcap = usdt_mcap + usdc_mcap
 
-        if "SPY" in result:
-            spy_change = result["SPY"]["change_pct"]
-            result["risk_appetite"] = "risk_on" if spy_change > 0.5 else (
-                "risk_off" if spy_change < -0.5 else "neutral"
-            )
+                result = {
+                    "usdt_market_cap": round(usdt_mcap / 1e9, 2),  # in billions
+                    "usdc_market_cap": round(usdc_mcap / 1e9, 2),
+                    "total_stablecoin_cap_b": round(total_stable_mcap / 1e9, 2),
+                    "usdt_24h_vol": round(usdt.get("usd_24h_vol", 0) / 1e9, 2),
+                }
+                self._set_cache(cache_key, result)
+                return result
+        except Exception as e:
+            logger.warning(f"Stablecoin market fetch failed: {e}")
 
-        self._set_cache(cache_key, result)
-        return result
+        return {}
 
     def get_full_correlation_data(self, exchange_client=None) -> dict:
         """Get all market correlation data."""
         data = {
             "btc_dominance": self.get_btc_dominance(),
-            "traditional_markets": self.get_dxy_and_tradfi(),
+            "stablecoin_market": self.get_stablecoin_market(),
             "fetched_at": datetime.utcnow().isoformat(),
         }
         return data
