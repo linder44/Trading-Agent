@@ -31,6 +31,19 @@ class ExchangeClient:
         mode = "demo" if cfg.demo else ("auth" if self._has_auth else "public only")
         logger.info(f"Exchange initialized (mode={mode})")
 
+        # Pre-load markets so we can validate symbols later
+        self.exchange.load_markets()
+
+    def validate_symbols(self, symbols: list[str]) -> list[str]:
+        """Return only symbols available on the exchange."""
+        valid = []
+        for s in symbols:
+            if s in self.exchange.markets:
+                valid.append(s)
+            else:
+                logger.warning(f"Symbol {s} not available on exchange (demo={self._is_demo}), skipping")
+        return valid
+
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> pd.DataFrame:
         """Fetch OHLCV candles as DataFrame. Works without auth."""
         raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)

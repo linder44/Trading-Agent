@@ -23,7 +23,7 @@ class BitgetConfig(BaseModel):
 
 class ClaudeConfig(BaseModel):
     api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-6"
     max_tokens: int = 4096
 
 

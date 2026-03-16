@@ -71,6 +71,13 @@ class TradingAgent:
         self.news = NewsFetcher(config.news)
         self.social = SocialSentiment()
 
+        # Validate symbols against exchange
+        self.symbols = self.exchange.validate_symbols(config.trading.symbols)
+        if not self.symbols:
+            logger.error("No valid trading symbols found! Check your config.")
+            sys.exit(1)
+        logger.info(f"Active symbols: {self.symbols}")
+
         # Paper trading state
         self.paper_balance = config.paper.initial_balance
         self.paper_trades: list[dict] = []
@@ -99,7 +106,7 @@ class TradingAgent:
         # 1. Technical analysis (multi-timeframe)
         technical_data = {}
         ohlcv_cache = {}  # Cache for pattern analysis
-        for symbol in config.trading.symbols:
+        for symbol in self.symbols:
             try:
                 ohlcv_dict = {}
                 for tf in config.trading.timeframes:
@@ -132,7 +139,7 @@ class TradingAgent:
 
         # 3. On-chain and derivatives data
         logger.info("Fetching on-chain data (funding rates, OI, whales)...")
-        onchain_data = self.onchain.get_full_onchain_data(self.exchange, config.trading.symbols)
+        onchain_data = self.onchain.get_full_onchain_data(self.exchange, self.symbols)
 
         # 4. News and fundamental context
         logger.info("Fetching news and market context...")
