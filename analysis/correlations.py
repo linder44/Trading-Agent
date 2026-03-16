@@ -78,29 +78,39 @@ class MarketCorrelations:
             "VIX": "Volatility Index (Fear gauge)",
         }
 
+        # Use Yahoo Finance crumb-free endpoint with longer timeout
+        yahoo_hosts = [
+            "https://query2.finance.yahoo.com",
+            "https://query1.finance.yahoo.com",
+        ]
         for symbol, name in symbols.items():
-            try:
-                # Using Yahoo Finance v8 API (public)
-                resp = requests.get(
-                    f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
-                    params={"range": "5d", "interval": "1d"},
-                    headers={"User-Agent": "TradingAgent/1.0"},
-                    timeout=10,
-                )
-                if resp.status_code == 200:
-                    chart = resp.json().get("chart", {}).get("result", [{}])[0]
-                    meta = chart.get("meta", {})
-                    price = meta.get("regularMarketPrice", 0)
-                    prev_close = meta.get("chartPreviousClose", price)
-                    change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
+            fetched = False
+            for host in yahoo_hosts:
+                if fetched:
+                    break
+                try:
+                    resp = requests.get(
+                        f"{host}/v8/finance/chart/{symbol}",
+                        params={"range": "5d", "interval": "1d"},
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                        timeout=15,
+                    )
+                    if resp.status_code == 200:
+                        chart = resp.json().get("chart", {}).get("result", [{}])[0]
+                        meta = chart.get("meta", {})
+                        price = meta.get("regularMarketPrice", 0)
+                        prev_close = meta.get("chartPreviousClose", price)
+                        change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0
 
-                    result[symbol] = {
-                        "name": name,
-                        "price": round(price, 2),
-                        "change_pct": round(change_pct, 2),
-                    }
-            except Exception as e:
-                logger.warning(f"Failed to fetch {symbol}: {e}")
+                        result[symbol] = {
+                            "name": name,
+                            "price": round(price, 2),
+                            "change_pct": round(change_pct, 2),
+                        }
+                        fetched = True
+                except Exception as e:
+                    logger.warning(f"Failed to fetch {symbol} from {host}: {e}")
+                    continue
 
         # Add interpretations
         if "DXY" in result:
@@ -125,19 +135,26 @@ class MarketCorrelations:
         return result
 
     def get_eth_btc_ratio(self, exchange_client) -> dict:
-        """Get ETH/BTC ratio - indicates altcoin strength."""
+        """Get ETH/BTC ratio - indicates altcoin strength.
+
+        Computed from ETH/USDT and BTC/USDT since ETH/BTC pair may not exist on swap.
+        """
         try:
-            ticker = exchange_client.fetch_ticker("ETH/BTC")
-            price = ticker["last"]
-            return {
-                "eth_btc_ratio": round(price, 6),
-                "signal": "alts_strong" if price > 0.05 else (
-                    "alts_weak" if price < 0.03 else "neutral"
-                ),
-            }
+            eth_ticker = exchange_client.fetch_ticker("ETH/USDT:USDT")
+            btc_ticker = exchange_client.fetch_ticker("BTC/USDT:USDT")
+            eth_price = eth_ticker["last"]
+            btc_price = btc_ticker["last"]
+            if btc_price and btc_price > 0:
+                price = eth_price / btc_price
+                return {
+                    "eth_btc_ratio": round(price, 6),
+                    "signal": "alts_strong" if price > 0.05 else (
+                        "alts_weak" if price < 0.03 else "neutral"
+                    ),
+                }
         except Exception as e:
             logger.warning(f"ETH/BTC ratio fetch failed: {e}")
-            return {"eth_btc_ratio": 0, "signal": "unknown"}
+        return {"eth_btc_ratio": 0, "signal": "unknown"}
 
     def get_full_correlation_data(self, exchange_client=None) -> dict:
         """Get all market correlation data."""

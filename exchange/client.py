@@ -52,6 +52,14 @@ class ExchangeClient:
         # Pre-load markets so we can validate symbols later
         self.exchange.load_markets()
 
+        # Set one-way position mode (Bitget default may be hedge mode)
+        if self._has_auth:
+            try:
+                self.exchange.set_position_mode(hedged=False)
+                logger.info("Режим позиций: one-way (односторонний)")
+            except Exception as e:
+                logger.debug(f"set_position_mode: {e} (может быть уже установлен)")
+
     def validate_symbols(self, symbols: list[str]) -> list[str]:
         """Возвращает только символы, доступные на фьючерсах (swap) биржи.
 

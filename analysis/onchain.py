@@ -54,8 +54,8 @@ class OnChainAnalyzer:
         """
         try:
             oi = exchange_client.exchange.fetch_open_interest(symbol)
-            oi_value = float(oi.get("openInterestValue", 0))
-            oi_amount = float(oi.get("openInterestAmount", 0))
+            oi_value = float(oi.get("openInterestValue") or 0)
+            oi_amount = float(oi.get("openInterestAmount") or 0)
             return {
                 "open_interest_value_usd": round(oi_value, 2),
                 "open_interest_amount": round(oi_amount, 4),
@@ -70,13 +70,45 @@ class OnChainAnalyzer:
         Ratio > 1 = more longs than shorts
         Extreme ratios often signal reversals (contrarian indicator)
         """
+        # Try CoinGlass public API first (more reliable than ccxt for this)
+        base_coin = symbol.split("/")[0]
+        cache_key = f"ls_ratio_{base_coin}"
+        if self._is_cached(cache_key):
+            return self._cache[cache_key]["data"]
+
         try:
-            # Try fetching via ccxt if supported
+            resp = requests.get(
+                "https://open-api.coinglass.com/public/v2/indicator/top_long_short_account_ratio",
+                params={"symbol": base_coin, "time_type": "h4"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                api_data = resp.json().get("data", [])
+                if api_data:
+                    latest = api_data[-1] if isinstance(api_data, list) else api_data
+                    long_pct = float(latest.get("longAccount", 0.5))
+                    short_pct = float(latest.get("shortAccount", 0.5))
+                    ratio = long_pct / short_pct if short_pct > 0 else 1.0
+                    result = {
+                        "long_pct": round(long_pct * 100, 1),
+                        "short_pct": round(short_pct * 100, 1),
+                        "ratio": round(ratio, 2),
+                        "signal": "contrarian_bearish" if ratio > 2.0 else (
+                            "contrarian_bullish" if ratio < 0.5 else "neutral"
+                        ),
+                    }
+                    self._set_cache(cache_key, result)
+                    return result
+        except Exception as e:
+            logger.warning(f"Long/short ratio (CoinGlass) fetch failed for {base_coin}: {e}")
+
+        # Fallback: try ccxt
+        try:
             ratio_data = exchange_client.exchange.fetch_long_short_ratio_history(symbol, limit=1)
             if ratio_data:
                 latest = ratio_data[-1]
-                long_pct = float(latest.get("longAccount", 0.5))
-                short_pct = float(latest.get("shortAccount", 0.5))
+                long_pct = float(latest.get("longAccount") or 0.5)
+                short_pct = float(latest.get("shortAccount") or 0.5)
                 ratio = long_pct / short_pct if short_pct > 0 else 1.0
                 return {
                     "long_pct": round(long_pct * 100, 1),
@@ -87,7 +119,7 @@ class OnChainAnalyzer:
                     ),
                 }
         except Exception as e:
-            logger.warning(f"Long/short ratio fetch failed for {symbol}: {e}")
+            logger.warning(f"Long/short ratio (ccxt) fetch failed for {symbol}: {e}")
 
         return {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 

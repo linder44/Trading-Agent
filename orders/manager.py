@@ -52,6 +52,11 @@ class OrderManager:
             order_ids = [entry_order["id"], sl_order["id"], tp_order["id"]]
             self.risk.register_position(symbol, "long", price, amount, stop_loss, take_profit, order_ids)
 
+            logger.info(
+                f"ЛОНГ ОТКРЫТ {symbol} | Цена: {price} | Объём: {amount} | "
+                f"SL: {stop_loss} | TP: {take_profit}"
+            )
+
             return {
                 "action": "open_long",
                 "symbol": symbol,
@@ -99,6 +104,11 @@ class OrderManager:
 
             order_ids = [entry_order["id"], sl_order["id"], tp_order["id"]]
             self.risk.register_position(symbol, "short", price, amount, stop_loss, take_profit, order_ids)
+
+            logger.info(
+                f"ШОРТ ОТКРЫТ {symbol} | Цена: {price} | Объём: {amount} | "
+                f"SL: {stop_loss} | TP: {take_profit}"
+            )
 
             return {
                 "action": "open_short",
@@ -184,12 +194,17 @@ class OrderManager:
         try:
             order_side = "buy" if side == "long" else "sell"
             order = self.exchange.create_trigger_order(symbol, order_side, amount, trigger_price)
+            logger.info(
+                f"ТРИГГЕР {side.upper()} {symbol} | Триггер: {trigger_price} | "
+                f"Объём: {amount} | SL: {stop_loss}"
+            )
             return {
                 "action": f"trigger_{side}",
                 "symbol": symbol,
                 "side": side,
                 "amount": amount,
                 "trigger_price": trigger_price,
+                "stop_loss": stop_loss,
                 "order_id": order["id"],
             }
         except Exception as e:
