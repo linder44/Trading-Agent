@@ -107,14 +107,15 @@ class OnChainAnalyzer:
             )
             if resp.status_code == 200:
                 api_data = resp.json().get("data", {})
-                if api_data:
-                    amount = float(api_data.get("openInterestAmount", 0))
-                    # Для value нужна цена — получим через тикер
+                # Bitget v2: данные в openInterestList[0]["size"]
+                oi_list = api_data.get("openInterestList", [])
+                if oi_list:
+                    amount = float(oi_list[0].get("size", 0))
                     result = {
                         "open_interest_amount": round(amount, 4),
-                        "open_interest_value_usd": 0,  # будет заполнено ниже
+                        "open_interest_value_usd": 0,
                     }
-                    # Попробуем получить цену для расчёта USD value
+                    # Получаем цену для расчёта USD value
                     try:
                         ticker = exchange_client.exchange.fetch_ticker(symbol)
                         price = float(ticker.get("last", 0))

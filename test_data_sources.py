@@ -95,7 +95,7 @@ def test_bitget_long_short():
         resp = requests.get(
             "https://api.bitget.com/api/v2/mix/market/account-long-short",
             params={"symbol": "BTCUSDT", "period": "5m", "productType": "USDT-FUTURES"},
-            timeout=8,
+            timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -148,7 +148,7 @@ def test_bitget_open_interest():
         resp = requests.get(
             "https://api.bitget.com/api/v2/mix/market/open-interest",
             params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES"},
-            timeout=10,
+            timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -156,15 +156,14 @@ def test_bitget_open_interest():
             logger.error(f"  Bitget API error: {data.get('msg', 'unknown')}")
             return False
         oi_data = data.get("data", {})
-        # Bitget может вернуть данные в разных полях — проверяем все варианты
-        amount = float(oi_data.get("openInterestAmount", 0))
-        size = float(oi_data.get("amount", 0))
-        value = float(oi_data.get("openInterestValue", 0))
-        best = amount or size or value
-        logger.info(f"  BTC open interest: amount={amount}, size={size}, value={value}")
-        logger.info(f"  Raw response keys: {list(oi_data.keys())}")
-        logger.info(f"  Raw response: {oi_data}")
-        return best > 0 or bool(oi_data)  # OK если API вернул хоть какие-то данные
+        # Bitget v2 возвращает данные в openInterestList[0]["size"]
+        oi_list = oi_data.get("openInterestList", [])
+        if oi_list:
+            size = float(oi_list[0].get("size", 0))
+            logger.info(f"  BTC open interest: {size:,.2f} BTC")
+            return size > 0
+        logger.warning("  Empty openInterestList")
+        return False
     except Exception as e:
         logger.error(f"  FAIL: {e}")
         return False
