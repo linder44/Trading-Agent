@@ -38,6 +38,7 @@ class OnChainAnalyzer:
         resp = request_with_retry(
             f"{self.BITGET_BASE}/current-fund-rate",
             params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
+            timeout=15,
         )
         if resp:
             api_data = resp.json().get("data", [])
@@ -101,6 +102,8 @@ class OnChainAnalyzer:
 
         return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
+    _LS_PERIODS = ("5m", "15m", "1h")
+
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
         """Get long/short ratio using Bitget public API directly."""
         base_coin = symbol.split("/")[0]
@@ -108,16 +111,37 @@ class OnChainAnalyzer:
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        resp = request_with_retry(
-            f"{self.BITGET_BASE}/account-long-short",
-            params={"symbol": f"{base_coin}USDT", "period": "5m", "productType": "USDT-FUTURES"},
-        )
-        if resp:
-            api_data = resp.json().get("data", [])
-            if api_data:
-                latest = api_data[-1] if isinstance(api_data, list) else api_data
-                long_ratio = float(latest.get("longAccountRatio", 0.5))
-                short_ratio = float(latest.get("shortAccountRatio", 0.5))
+        # Bitget не поддерживает все периоды для всех символов — пробуем несколько
+        for period in self._LS_PERIODS:
+            resp = request_with_retry(
+                f"{self.BITGET_BASE}/account-long-short",
+                params={"symbol": f"{base_coin}USDT", "period": period, "productType": "USDT-FUTURES"},
+                retries=1,
+            )
+            if resp:
+                api_data = resp.json().get("data", [])
+                if api_data:
+                    latest = api_data[-1] if isinstance(api_data, list) else api_data
+                    long_ratio = float(latest.get("longAccountRatio", 0.5))
+                    short_ratio = float(latest.get("shortAccountRatio", 0.5))
+                    ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
+                    result = {
+                        "long_pct": round(long_ratio * 100, 1),
+                        "short_pct": round(short_ratio * 100, 1),
+                        "ratio": round(ratio, 2),
+                        "signal": "contrarian_bearish" if ratio > 2.0 else (
+                            "contrarian_bullish" if ratio < 0.5 else "neutral"
+                        ),
+                    }
+                    self._set_cache(cache_key, result)
+                    return result
+
+        # Fallback: ccxt
+        try:
+            ls = exchange_client.exchange.fetch_long_short_ratio_history(symbol, limit=1)
+            if ls:
+                long_ratio = float(ls[0].get("longAccount", 0.5))
+                short_ratio = float(ls[0].get("shortAccount", 0.5))
                 ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
                 result = {
                     "long_pct": round(long_ratio * 100, 1),
@@ -129,6 +153,8 @@ class OnChainAnalyzer:
                 }
                 self._set_cache(cache_key, result)
                 return result
+        except Exception as e:
+            logger.debug(f"Long/short ratio ccxt fallback failed for {symbol}: {e}")
 
         return {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 
