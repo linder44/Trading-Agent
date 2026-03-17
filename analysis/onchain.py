@@ -41,7 +41,7 @@ class OnChainAnalyzer:
                     "symbol": f"{base_coin}USDT",
                     "productType": "USDT-FUTURES",
                 },
-                timeout=8,
+                timeout=15,
             )
             if resp.status_code == 200:
                 api_data = resp.json().get("data", [])
@@ -83,24 +83,65 @@ class OnChainAnalyzer:
         return {"funding_rate": 0, "funding_rate_pct": 0, "sentiment": "unknown"}
 
     def get_open_interest(self, exchange_client, symbol: str) -> dict:
-        """Get open interest data.
+        """Get open interest data via Bitget REST API.
 
         Rising OI + Rising price = strong trend (new money entering)
         Rising OI + Falling price = bearish pressure
         Falling OI + Rising price = short squeeze / weak rally
         Falling OI + Falling price = capitulation
         """
+        base_coin = symbol.split("/")[0]
+        cache_key = f"oi_{base_coin}"
+        if self._is_cached(cache_key):
+            return self._cache[cache_key]["data"]
+
+        # Bitget REST API — не зависит от load_markets()
+        try:
+            resp = requests.get(
+                "https://api.bitget.com/api/v2/mix/market/open-interest",
+                params={
+                    "symbol": f"{base_coin}USDT",
+                    "productType": "USDT-FUTURES",
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                api_data = resp.json().get("data", {})
+                if api_data:
+                    amount = float(api_data.get("openInterestAmount", 0))
+                    # Для value нужна цена — получим через тикер
+                    result = {
+                        "open_interest_amount": round(amount, 4),
+                        "open_interest_value_usd": 0,  # будет заполнено ниже
+                    }
+                    # Попробуем получить цену для расчёта USD value
+                    try:
+                        ticker = exchange_client.exchange.fetch_ticker(symbol)
+                        price = float(ticker.get("last", 0))
+                        if price > 0:
+                            result["open_interest_value_usd"] = round(amount * price, 2)
+                    except Exception:
+                        pass
+                    self._set_cache(cache_key, result)
+                    return result
+        except Exception as e:
+            logger.warning(f"Open interest REST failed for {base_coin}: {e}")
+
+        # Fallback: ccxt
         try:
             oi = exchange_client.exchange.fetch_open_interest(symbol)
             oi_value = float(oi.get("openInterestValue") or 0)
             oi_amount = float(oi.get("openInterestAmount") or 0)
-            return {
+            result = {
                 "open_interest_value_usd": round(oi_value, 2),
                 "open_interest_amount": round(oi_amount, 4),
             }
+            self._set_cache(cache_key, result)
+            return result
         except Exception as e:
-            logger.warning(f"Open interest fetch failed for {symbol}: {e}")
-            return {"open_interest_value_usd": 0, "open_interest_amount": 0}
+            logger.warning(f"Open interest ccxt fallback failed for {symbol}: {e}")
+
+        return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
         """Get long/short ratio using Bitget public API directly.
@@ -122,7 +163,7 @@ class OnChainAnalyzer:
                     "period": "5m",
                     "productType": "USDT-FUTURES",
                 },
-                timeout=8,
+                timeout=15,
             )
             if resp.status_code == 200:
                 api_data = resp.json().get("data", [])
@@ -169,7 +210,7 @@ class OnChainAnalyzer:
                     "productType": "USDT-FUTURES",
                     "limit": "100",
                 },
-                timeout=8,
+                timeout=15,
             )
             if resp.status_code == 200:
                 fills = resp.json().get("data", [])
@@ -235,6 +276,41 @@ class OnChainAnalyzer:
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
+        # Bitget REST API — merge-depth (не зависит от load_markets)
+        try:
+            resp = requests.get(
+                "https://api.bitget.com/api/v2/mix/market/merge-depth",
+                params={
+                    "symbol": "BTCUSDT",
+                    "productType": "USDT-FUTURES",
+                    "limit": "50",
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                ob = resp.json().get("data", {})
+                bids = ob.get("bids", [])
+                asks = ob.get("asks", [])
+                if bids and asks:
+                    bid_volume = sum(float(b[1]) for b in bids)
+                    ask_volume = sum(float(a[1]) for a in asks)
+                    total = bid_volume + ask_volume
+                    if total > 0:
+                        bid_ratio = bid_volume / total
+                        result = {
+                            "bid_volume_btc": round(bid_volume, 2),
+                            "ask_volume_btc": round(ask_volume, 2),
+                            "bid_ratio": round(bid_ratio, 3),
+                            "signal": "accumulation" if bid_ratio > 0.55 else (
+                                "selling_pressure" if bid_ratio < 0.45 else "balanced"
+                            ),
+                        }
+                        self._set_cache(cache_key, result)
+                        return result
+        except Exception as e:
+            logger.warning(f"Exchange netflow REST failed: {e}")
+
+        # Fallback: ccxt
         try:
             ob = exchange_client.exchange.fetch_order_book("BTC/USDT:USDT", limit=50)
             bid_volume = sum(b[1] for b in ob.get("bids", []))
@@ -253,7 +329,7 @@ class OnChainAnalyzer:
                 self._set_cache(cache_key, result)
                 return result
         except Exception as e:
-            logger.warning(f"Exchange netflow (order book) fetch failed: {e}")
+            logger.warning(f"Exchange netflow ccxt fallback failed: {e}")
 
         return {"bid_volume_btc": 0, "ask_volume_btc": 0, "bid_ratio": 0.5, "signal": "unknown"}
 

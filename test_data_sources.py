@@ -143,18 +143,22 @@ def test_bitget_funding():
 
 
 def test_bitget_open_interest():
-    """Test Bitget open interest via ccxt."""
+    """Test Bitget open interest via REST API."""
     try:
-        import ccxt
-        exchange = ccxt.bitget({"enableRateLimit": True, "options": {"defaultType": "swap"}})
-        exchange.load_markets()
-        oi = exchange.fetch_open_interest("BTC/USDT:USDT")
-        oi_val = float(oi.get("openInterestValue") or 0)
-        logger.info(f"  BTC open interest: ${oi_val:,.0f}")
-        return True
-    except ImportError:
-        logger.warning("  SKIP: ccxt not installed")
-        return None
+        resp = requests.get(
+            "https://api.bitget.com/api/v2/mix/market/open-interest",
+            params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != "00000":
+            logger.error(f"  Bitget API error: {data.get('msg', 'unknown')}")
+            return False
+        oi_data = data.get("data", {})
+        amount = float(oi_data.get("openInterestAmount", 0))
+        logger.info(f"  BTC open interest: {amount:,.2f} BTC")
+        return amount > 0
     except Exception as e:
         logger.error(f"  FAIL: {e}")
         return False
@@ -168,9 +172,9 @@ def test_bitget_whale_trades():
             params={
                 "symbol": "BTCUSDT",
                 "productType": "USDT-FUTURES",
-                "limit": "100",
+                "limit": "50",
             },
-            timeout=8,
+            timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -193,21 +197,30 @@ def test_bitget_whale_trades():
 
 
 def test_bitget_orderbook():
-    """Test order book fetch for exchange netflow proxy."""
+    """Test order book fetch via Bitget REST API (merge-depth)."""
     try:
-        import ccxt
-        exchange = ccxt.bitget({"enableRateLimit": True, "options": {"defaultType": "swap"}})
-        exchange.load_markets()
-        ob = exchange.fetch_order_book("BTC/USDT:USDT", limit=50)
-        bid_vol = sum(b[1] for b in ob.get("bids", []))
-        ask_vol = sum(a[1] for a in ob.get("asks", []))
+        resp = requests.get(
+            "https://api.bitget.com/api/v2/mix/market/merge-depth",
+            params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "limit": "50"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != "00000":
+            logger.error(f"  Bitget API error: {data.get('msg', 'unknown')}")
+            return False
+        ob = data.get("data", {})
+        bids = ob.get("bids", [])
+        asks = ob.get("asks", [])
+        if not bids or not asks:
+            logger.warning("  Empty order book data")
+            return False
+        bid_vol = sum(float(b[1]) for b in bids)
+        ask_vol = sum(float(a[1]) for a in asks)
         total = bid_vol + ask_vol
         ratio = bid_vol / total if total > 0 else 0.5
         logger.info(f"  Order book: bids={bid_vol:.2f} BTC, asks={ask_vol:.2f} BTC, bid_ratio={ratio:.3f}")
         return True
-    except ImportError:
-        logger.warning("  SKIP: ccxt not installed")
-        return None
     except Exception as e:
         logger.error(f"  FAIL: {e}")
         return False
@@ -289,8 +302,8 @@ def main():
         "onchain": [
             ("Bitget Long/Short Ratio (REST)", test_bitget_long_short),
             ("Bitget Funding Rate (REST)", test_bitget_funding),
-            ("Bitget Open Interest (ccxt)", test_bitget_open_interest),
-            ("Bitget Order Book (netflow proxy)", test_bitget_orderbook),
+            ("Bitget Open Interest (REST)", test_bitget_open_interest),
+            ("Bitget Order Book (REST)", test_bitget_orderbook),
             ("Bitget Whale Trades (REST)", test_bitget_whale_trades),
         ],
         "social": [
