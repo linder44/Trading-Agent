@@ -193,10 +193,14 @@ class ExchangeClient:
         return order
 
     def create_trigger_order(self, symbol: str, side: str, amount: float, trigger_price: float, params: dict | None = None) -> dict:
-        """Триггерный ордер — рыночный ордер, активирующийся при достижении trigger_price."""
+        """Триггерный ордер — рыночный ордер, активирующийся при достижении trigger_price.
+
+        Bitget v2 API expects triggerType to be 'fill_price' (last price)
+        or 'mark_price'. The value 'market_price' causes error 400172.
+        """
         params = params or {}
         params["triggerPrice"] = trigger_price
-        params["triggerType"] = "market_price"
+        params["triggerType"] = "mark_price"
         order = self.exchange.create_order(symbol, "market", side, amount, params=params)
         logger.info(f"Триггерный ордер {side} {amount} {symbol} триггер @ {trigger_price} -> {order['id']}")
         return order
