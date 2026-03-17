@@ -87,7 +87,18 @@ class ExchangeClient:
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> pd.DataFrame:
         """Fetch OHLCV candles as DataFrame. Works without auth."""
-        raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        try:
+            raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        except Exception:
+            # Некоторые версии ccxt маппят "1d" → "1Dutc", что Bitget не принимает.
+            # Пробуем с явным params override.
+            if timeframe in ("1d", "1D"):
+                raw = self.exchange.fetch_ohlcv(
+                    symbol, timeframe, limit=limit,
+                    params={"granularity": "1d", "productType": "USDT-FUTURES"},
+                )
+            else:
+                raise
         df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)
