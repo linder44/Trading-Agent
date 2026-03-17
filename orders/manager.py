@@ -157,14 +157,15 @@ class OrderManager:
             logger.error(f"Ошибка размещения лимитного ордера {symbol}: {e}")
             return None
 
-    def place_trigger_order(self, symbol: str, side: str, balance: float, trigger_price: float) -> dict | None:
-        """Разместить триггерный ордер — откроет позицию по рынку, когда цена достигнет trigger_price."""
+    def place_trigger_order(self, symbol: str, side: str, balance: float, trigger_price: float, atr: float | None = None) -> dict | None:
+        """Разместить триггерный ордер с SL/TP — откроет позицию по рынку, когда цена достигнет trigger_price."""
         can_open, reason = self.risk.can_open_position(symbol, balance)
         if not can_open:
             logger.warning(f"Не могу разместить триггерный ордер {symbol}: {reason}")
             return None
 
-        stop_loss = self.risk.compute_stop_loss(trigger_price, side)
+        stop_loss = self.risk.compute_stop_loss(trigger_price, side, atr)
+        take_profit = self.risk.compute_take_profit(trigger_price, side, atr)
         amount = self.risk.calculate_position_size(balance, trigger_price, stop_loss)
 
         if amount <= 0:
@@ -173,13 +174,17 @@ class OrderManager:
 
         amount = self.exchange.round_amount(symbol, amount)
         trigger_price = self.exchange.round_price(symbol, trigger_price)
+        stop_loss = self.exchange.round_price(symbol, stop_loss)
+        take_profit = self.exchange.round_price(symbol, take_profit)
 
         try:
             order_side = "buy" if side == "long" else "sell"
-            order = self.exchange.create_trigger_order(symbol, order_side, amount, trigger_price)
+            order = self.exchange.create_trigger_order_with_sltp(
+                symbol, order_side, amount, trigger_price, stop_loss, take_profit,
+            )
             logger.info(
                 f"ТРИГГЕР {side.upper()} {symbol} | Триггер: {trigger_price} | "
-                f"Объём: {amount} | SL: {stop_loss}"
+                f"Объём: {amount} | SL: {stop_loss} | TP: {take_profit}"
             )
             return {
                 "action": f"trigger_{side}",
@@ -188,6 +193,7 @@ class OrderManager:
                 "amount": amount,
                 "trigger_price": trigger_price,
                 "stop_loss": stop_loss,
+                "take_profit": take_profit,
                 "order_id": order["id"],
             }
         except Exception as e:

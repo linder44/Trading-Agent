@@ -205,6 +205,34 @@ class ExchangeClient:
         logger.info(f"Триггерный ордер {side} {amount} {symbol} триггер @ {trigger_price} -> {order['id']}")
         return order
 
+    def create_trigger_order_with_sltp(
+        self, symbol: str, side: str, amount: float,
+        trigger_price: float, stop_loss: float, take_profit: float,
+    ) -> dict:
+        """Триггерный ордер с привязанными SL/TP в одном запросе.
+
+        Когда цена достигает trigger_price — открывается рыночный ордер,
+        а SL и TP автоматически выставляются на позицию.
+        """
+        params = {
+            "triggerPrice": trigger_price,
+            "triggerType": "mark_price",
+            "stopLoss": {
+                "triggerPrice": stop_loss,
+                "type": "market",
+            },
+            "takeProfit": {
+                "triggerPrice": take_profit,
+                "type": "market",
+            },
+        }
+        order = self.exchange.create_order(symbol, "market", side, amount, params=params)
+        logger.info(
+            f"Триггерный ордер {side} {amount} {symbol} "
+            f"триггер @ {trigger_price} SL={stop_loss} TP={take_profit} -> {order['id']}"
+        )
+        return order
+
     def cancel_order(self, order_id: str, symbol: str) -> dict:
         """Cancel an order."""
         result = self.exchange.cancel_order(order_id, symbol)

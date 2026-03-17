@@ -438,12 +438,14 @@ class TradingAgent:
             elif action == "trigger_long":
                 trigger_price = params.get("trigger_price")
                 if trigger_price:
-                    result = self.orders.place_trigger_order(symbol, "long", balance, trigger_price)
+                    atr = self._get_atr(symbol)
+                    result = self.orders.place_trigger_order(symbol, "long", balance, trigger_price, atr)
 
             elif action == "trigger_short":
                 trigger_price = params.get("trigger_price")
                 if trigger_price:
-                    result = self.orders.place_trigger_order(symbol, "short", balance, trigger_price)
+                    atr = self._get_atr(symbol)
+                    result = self.orders.place_trigger_order(symbol, "short", balance, trigger_price, atr)
 
             elif action == "hold":
                 logger.info(f"Удержание {symbol}: {reason}")
@@ -536,11 +538,15 @@ class TradingAgent:
             new_sl = result.get("new_stop_loss", "—")
             lines.append(f"\U0001F6E1 Новый SL:  <code>{new_sl}</code>")
         elif action in ("trigger_long", "trigger_short"):
-            tp = result.get("trigger_price", "—")
+            trig = result.get("trigger_price", "—")
             amt = result.get("amount", "—")
+            sl = result.get("stop_loss", "—")
+            tp = result.get("take_profit", "—")
             lines += [
-                f"\u23F3 Триггер цена:  <code>{tp}</code>",
+                f"\u23F3 Триггер цена:  <code>{trig}</code>",
                 f"\U0001F4E6 Объём:  <code>{amt}</code>",
+                f"\U0001F6D1 Стоп-лосс:  <code>{sl}</code>",
+                f"\U0001F3AF Тейк-профит:  <code>{tp}</code>",
             ]
 
         lines += [
