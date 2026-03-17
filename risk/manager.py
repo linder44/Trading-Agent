@@ -143,6 +143,61 @@ class RiskManager:
             "daily_trades": self.daily_trades,
         }
 
+    def compute_trailing_stop(self, symbol: str, current_price: float) -> float | None:
+        """Compute trailing stop for an open position.
+
+        Returns new stop loss price if it should be updated, None otherwise.
+        Trailing stop only moves in the profitable direction.
+        """
+        if symbol not in self.positions:
+            return None
+
+        pos = self.positions[symbol]
+        trailing_pct = self.cfg.trailing_stop_pct
+
+        if pos.side == "long":
+            # For longs, trailing stop moves up with price
+            new_sl = current_price * (1 - trailing_pct)
+            # Only move SL up, never down
+            if new_sl > pos.stop_loss and current_price > pos.entry_price:
+                return round(new_sl, 6)
+        else:
+            # For shorts, trailing stop moves down with price
+            new_sl = current_price * (1 + trailing_pct)
+            # Only move SL down, never up
+            if new_sl < pos.stop_loss and current_price < pos.entry_price:
+                return round(new_sl, 6)
+
+        return None
+
+    def check_all_trailing_stops(self, price_getter) -> list[dict]:
+        """Check trailing stops for all positions.
+
+        Args:
+            price_getter: callable(symbol) -> float, returns current price
+
+        Returns:
+            List of {symbol, old_sl, new_sl} for positions that need SL update
+        """
+        updates = []
+        for symbol, pos in self.positions.items():
+            try:
+                current_price = price_getter(symbol)
+                new_sl = self.compute_trailing_stop(symbol, current_price)
+                if new_sl is not None:
+                    old_sl = pos.stop_loss
+                    updates.append({
+                        "symbol": symbol,
+                        "old_sl": old_sl,
+                        "new_sl": new_sl,
+                        "side": pos.side,
+                        "entry_price": pos.entry_price,
+                        "current_price": current_price,
+                    })
+            except Exception as e:
+                logger.warning(f"Trailing stop check failed for {symbol}: {e}")
+        return updates
+
     def reset_daily_stats(self):
         """Reset daily counters (call at start of new day)."""
         self.daily_pnl = 0.0

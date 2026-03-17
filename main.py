@@ -24,6 +24,10 @@ from analysis.patterns import PatternRecognizer
 from analysis.onchain import OnChainAnalyzer
 from analysis.correlations import MarketCorrelations
 from analysis.quant import QuantAnalyzer
+from analysis.trade_history import TradeHistoryTracker
+from analysis.liquidations import LiquidationAnalyzer
+from analysis.cross_correlation import CrossCorrelationAnalyzer
+from analysis.time_context import TimeContextAnalyzer
 from news.fetcher import NewsFetcher
 from news.social import SocialSentiment
 from risk.manager import RiskManager
@@ -70,6 +74,10 @@ class TradingAgent:
         self.quant = QuantAnalyzer()
         self.news = NewsFetcher(config.news)
         self.social = SocialSentiment()
+        self.trade_history = TradeHistoryTracker()
+        self.liquidations = LiquidationAnalyzer()
+        self.cross_corr = CrossCorrelationAnalyzer()
+        self.time_context = TimeContextAnalyzer()
 
         # Валидация символов на бирже
         self.symbols = self.exchange.validate_symbols(config.trading.symbols)
@@ -153,6 +161,32 @@ class TradingAgent:
         logger.info("Загружаем рыночные корреляции (BTC Dominance, стейблкоины)...")
         correlation_data = self.correlations.get_full_correlation_data()
 
+        # 6b. Ликвидации
+        logger.info("Загружаем данные о ликвидациях...")
+        liquidation_data = self.liquidations.get_all_liquidations(self.symbols)
+
+        # 6c. Кросс-корреляция символов
+        logger.info("Вычисляем кросс-корреляцию символов...")
+        cross_corr_data = self.cross_corr.compute_correlation_matrix(ohlcv_cache)
+
+        # 6d. Временной контекст (сессия, день недели, экспирация)
+        time_context_data = self.time_context.get_time_context()
+
+        # 6e. История сделок
+        trade_history_data = self.trade_history.get_summary_for_prompt()
+
+        # 6f. Трейлинг-стопы
+        if self.mode in ("demo", "live") and self.risk.positions:
+            logger.info("Проверяем трейлинг-стопы...")
+            trailing_updates = self.risk.check_all_trailing_stops(
+                lambda sym: self.exchange.fetch_ticker(sym)["last"]
+            )
+            for update in trailing_updates:
+                logger.info(
+                    f"Трейлинг-стоп {update['symbol']}: SL {update['old_sl']} -> {update['new_sl']}"
+                )
+                self.orders.update_stop_loss(update["symbol"], update["new_sl"])
+
         # 7. Get portfolio state
         if self.mode in ("demo", "live"):
             balance = self.exchange.fetch_usdt_balance()
@@ -178,6 +212,10 @@ class TradingAgent:
             social_data=social_data,
             correlation_data=correlation_data,
             quant_data=quant_data,
+            liquidation_data=liquidation_data,
+            cross_corr_data=cross_corr_data,
+            time_context_data=time_context_data,
+            trade_history_data=trade_history_data,
         )
 
         logger.info(f"Прогноз ИИ: {decision.get('market_outlook', 'Н/Д')}")
@@ -378,6 +416,18 @@ class TradingAgent:
                 result = self.orders.open_short(symbol, balance, price, atr)
 
             elif action == "close":
+                # Record trade in history before closing
+                if symbol in self.risk.positions:
+                    pos = self.risk.positions[symbol]
+                    ticker = self.exchange.fetch_ticker(symbol)
+                    exit_price = ticker["last"]
+                    duration = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 60
+                    self.trade_history.record_trade(
+                        symbol=symbol, side=pos.side,
+                        entry_price=pos.entry_price, exit_price=exit_price,
+                        amount=pos.amount, reason_open="", reason_close=reason,
+                        duration_minutes=duration,
+                    )
                 result = self.orders.close_position(symbol)
 
             elif action == "update_sl":

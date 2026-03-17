@@ -227,6 +227,37 @@ SYSTEM_PROMPT = """Ты — экспертный автономный агент
 - ВСЕГДА проверяй это ПЕРВЫМ — говорит, торговать по тренду, против тренда или оставаться вне рынка
 - Если режим = "high_risk" → перекрой все сигналы, сокращай экспозицию
 
+### 9. Ликвидации (каскадное принудительное закрытие)
+- **Высокое давление ликвидаций лонгов** → массовое принудительное закрытие → потенциальное дно (покупай)
+- **Высокое давление ликвидаций шортов** → шорт-сквиз → потенциальная вершина (продавай)
+- **Stress level = extreme** → НЕ ВХОДИ В РЫНОК, жди стабилизации
+- Каскады ликвидаций часто создают V-развороты
+
+### 10. Кросс-корреляция символов
+- **Высокая корреляция (>0.8)** между позициями = избыточный риск. Не открывай одновременно лонг BTC и лонг ETH если корр > 0.8
+- **Дивергенция**: если обычно коррелированные пары расходятся — ищи причину или торгуй конвергенцию
+- **Лидеры/отстающие**: отстающие монеты могут догнать лидеров (catch-up trade)
+- **Relative strength**: покупай сильных, шорти слабых
+
+### 11. Временной контекст
+- **Азиатская сессия** (00-08 UTC): низкая волатильность, часто range
+- **Пересечение EU/US** (13-16 UTC): максимальная ликвидность и волатильность — лучшее время для входов
+- **Выходные**: низкий объём, манипуляции — сокращай размер позиций
+- **Экспирация опционов**: за 1-3 дня до экспирации — высокая волатильность, пин-бары
+
+### 12. История твоих сделок (обратная связь)
+- Изучи свой win rate и worst_symbols — НЕ повторяй ошибки
+- Если на определённом символе постоянно проигрываешь — пропусти его или сокращай размер
+- Если win rate < 40% — будь консервативнее, повышай порог confidence до 0.75
+- profit_factor < 1.0 → ты теряешь деньги, сокращай экспозицию
+
+### 13. Volume Profile / VPOC
+- **VPOC (Volume Point of Control)** = цена с максимальным объёмом — сильнейший магнит и поддержка/сопротивление
+- **Цена выше VPOC** = бычий контекст, VPOC как поддержка
+- **Цена ниже VPOC** = медвежий контекст, VPOC как сопротивление
+- **Value Area (VAH-VAL)** = зона 70% объёма — цена тяготеет к возврату в эту зону
+- Пробой за пределы Value Area с объёмом = сильный сигнал продолжения
+
 ## Правила риска (НИКОГДА НЕ НАРУШАЙ)
 - Максимум 10% портфеля на сделку
 - Всегда используй стоп-лоссы (предпочтительно на основе ATR)
@@ -304,13 +335,18 @@ class TradingBrain:
         social_data: dict | None = None,
         correlation_data: dict | None = None,
         quant_data: dict | None = None,
+        liquidation_data: dict | None = None,
+        cross_corr_data: dict | None = None,
+        time_context_data: dict | None = None,
+        trade_history_data: dict | None = None,
     ) -> dict:
         """Send all data to Claude and get trading decisions."""
 
         user_message = self._build_prompt(
             technical_data, market_context, portfolio, balance,
             onchain_data, pattern_data, social_data, correlation_data,
-            quant_data,
+            quant_data, liquidation_data, cross_corr_data,
+            time_context_data, trade_history_data,
         )
 
         # Log prompt size for monitoring
@@ -369,6 +405,10 @@ class TradingBrain:
         social_data: dict | None = None,
         correlation_data: dict | None = None,
         quant_data: dict | None = None,
+        liquidation_data: dict | None = None,
+        cross_corr_data: dict | None = None,
+        time_context_data: dict | None = None,
+        trade_history_data: dict | None = None,
     ) -> str:
         """Build the analysis prompt with all market data."""
 
@@ -404,6 +444,18 @@ USDT Available: {balance:.2f}
 
         if quant_data:
             prompt += f"\n## Quantitative / Scientific Analysis (Hurst, Kalman, FFT, VaR, Entropy, Z-Score)\n{_compact_json(quant_data)}\n"
+
+        if liquidation_data:
+            prompt += f"\n## Liquidation Data (cascade detection)\n{_compact_json(liquidation_data)}\n"
+
+        if cross_corr_data:
+            prompt += f"\n## Cross-Symbol Correlation\n{_compact_json(cross_corr_data, indent=1)}\n"
+
+        if time_context_data:
+            prompt += f"\n## Time & Session Context\n{_compact_json(time_context_data, indent=1)}\n"
+
+        if trade_history_data and trade_history_data.get("total_trades", 0) > 0:
+            prompt += f"\n## Your Trade History (learn from past decisions)\n{_compact_json(trade_history_data, indent=1)}\n"
 
         # Report missing/empty data sources so Claude knows what's unavailable
         missing = self._detect_missing_data(

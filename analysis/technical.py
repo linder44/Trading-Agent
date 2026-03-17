@@ -32,6 +32,7 @@ class TechnicalAnalyzer:
                 "obv", "vwap", "volume_sma_20", "volume_ratio",
                 "ichimoku_a", "ichimoku_b", "ichimoku_base", "ichimoku_conv",
                 "pivot", "support_1", "resistance_1",
+                "vpoc", "vah", "val",
             ]:
                 df[col] = float("nan")
             return df
@@ -94,7 +95,78 @@ class TechnicalAnalyzer:
         df["support_1"] = 2 * df["pivot"] - df["high"]
         df["resistance_1"] = 2 * df["pivot"] - df["low"]
 
+        # Volume Profile / VPOC
+        vpoc_data = self._compute_volume_profile(df)
+        df["vpoc"] = vpoc_data["vpoc"]
+        df["vah"] = vpoc_data["vah"]
+        df["val"] = vpoc_data["val"]
+
         return df
+
+    @staticmethod
+    def _compute_volume_profile(df: pd.DataFrame, num_bins: int = 30) -> dict:
+        """Compute Volume Profile and VPOC (Volume Point of Control).
+
+        VPOC = price level with the highest traded volume
+        VAH = Value Area High (upper 70% of volume)
+        VAL = Value Area Low (lower 70% of volume)
+
+        These act as strong support/resistance levels.
+        """
+        if len(df) < 20:
+            return {"vpoc": float("nan"), "vah": float("nan"), "val": float("nan")}
+
+        price_min = df["low"].min()
+        price_max = df["high"].max()
+
+        if price_max == price_min:
+            return {"vpoc": float(price_min), "vah": float(price_max), "val": float(price_min)}
+
+        # Create price bins
+        bin_edges = pd.np_compat = None  # avoid stale import
+        import numpy as np
+        bins = np.linspace(price_min, price_max, num_bins + 1)
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+
+        # Assign volume to bins based on where price traded
+        vol_profile = np.zeros(num_bins)
+        for _, row in df.iterrows():
+            # Distribute each candle's volume across its range
+            candle_low = row["low"]
+            candle_high = row["high"]
+            candle_vol = row["volume"]
+            for i in range(num_bins):
+                if bins[i + 1] >= candle_low and bins[i] <= candle_high:
+                    vol_profile[i] += candle_vol
+
+        # VPOC = bin with max volume
+        vpoc_idx = np.argmax(vol_profile)
+        vpoc = float(bin_centers[vpoc_idx])
+
+        # Value Area: 70% of total volume around VPOC
+        total_vol = vol_profile.sum()
+        target_vol = total_vol * 0.70
+        accumulated = vol_profile[vpoc_idx]
+        low_idx = vpoc_idx
+        high_idx = vpoc_idx
+
+        while accumulated < target_vol and (low_idx > 0 or high_idx < num_bins - 1):
+            expand_low = vol_profile[low_idx - 1] if low_idx > 0 else 0
+            expand_high = vol_profile[high_idx + 1] if high_idx < num_bins - 1 else 0
+            if expand_low >= expand_high and low_idx > 0:
+                low_idx -= 1
+                accumulated += expand_low
+            elif high_idx < num_bins - 1:
+                high_idx += 1
+                accumulated += expand_high
+            else:
+                low_idx -= 1
+                accumulated += expand_low
+
+        val = float(bin_centers[low_idx])
+        vah = float(bin_centers[high_idx])
+
+        return {"vpoc": round(vpoc, 6), "vah": round(vah, 6), "val": round(val, 6)}
 
     def generate_summary(self, df: pd.DataFrame, symbol: str) -> dict:
         """Generate a human-readable analysis summary for Claude."""
@@ -154,6 +226,15 @@ class TechnicalAnalyzer:
 
             # Ichimoku
             "above_cloud": bool(latest["close"] > max(latest["ichimoku_a"], latest["ichimoku_b"])),
+
+            # Volume Profile
+            "vpoc": round(float(latest["vpoc"]), 6) if not pd.isna(latest.get("vpoc", float("nan"))) else None,
+            "value_area_high": round(float(latest["vah"]), 6) if not pd.isna(latest.get("vah", float("nan"))) else None,
+            "value_area_low": round(float(latest["val"]), 6) if not pd.isna(latest.get("val", float("nan"))) else None,
+            "price_vs_vpoc": (
+                "above" if not pd.isna(latest.get("vpoc", float("nan"))) and latest["close"] > latest["vpoc"]
+                else "below" if not pd.isna(latest.get("vpoc", float("nan"))) else None
+            ),
         }
 
         logger.debug(f"Analysis summary for {symbol}: RSI={summary['rsi']}, trend={summary['trend_short']}")
