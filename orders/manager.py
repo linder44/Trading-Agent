@@ -34,22 +34,12 @@ class OrderManager:
         take_profit = self.exchange.round_price(symbol, take_profit)
 
         try:
-            # Place market entry
-            entry_order = self.exchange.create_market_order(symbol, "buy", amount)
-
-            # Place stop loss
-            sl_order = self.exchange.create_stop_loss(
-                symbol, "sell", amount, stop_loss,
-                params={"reduceOnly": True}
+            # Single order with SL/TP attached — no orphaned triggers
+            entry_order = self.exchange.create_market_order_with_sltp(
+                symbol, "buy", amount, stop_loss, take_profit,
             )
 
-            # Place take profit
-            tp_order = self.exchange.create_take_profit(
-                symbol, "sell", amount, take_profit,
-                params={"reduceOnly": True}
-            )
-
-            order_ids = [entry_order["id"], sl_order["id"], tp_order["id"]]
+            order_ids = [entry_order["id"]]
             self.risk.register_position(symbol, "long", price, amount, stop_loss, take_profit, order_ids)
 
             logger.info(
@@ -90,19 +80,12 @@ class OrderManager:
         take_profit = self.exchange.round_price(symbol, take_profit)
 
         try:
-            entry_order = self.exchange.create_market_order(symbol, "sell", amount)
-
-            sl_order = self.exchange.create_stop_loss(
-                symbol, "buy", amount, stop_loss,
-                params={"reduceOnly": True}
+            # Single order with SL/TP attached — no orphaned triggers
+            entry_order = self.exchange.create_market_order_with_sltp(
+                symbol, "sell", amount, stop_loss, take_profit,
             )
 
-            tp_order = self.exchange.create_take_profit(
-                symbol, "buy", amount, take_profit,
-                params={"reduceOnly": True}
-            )
-
-            order_ids = [entry_order["id"], sl_order["id"], tp_order["id"]]
+            order_ids = [entry_order["id"]]
             self.risk.register_position(symbol, "short", price, amount, stop_loss, take_profit, order_ids)
 
             logger.info(

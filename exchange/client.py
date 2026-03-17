@@ -142,6 +142,31 @@ class ExchangeClient:
         logger.info(f"Рыночный ордер {side} {amount} {symbol} -> {order['id']}")
         return order
 
+    def create_market_order_with_sltp(
+        self, symbol: str, side: str, amount: float,
+        stop_loss: float, take_profit: float,
+    ) -> dict:
+        """Place a market order with SL/TP attached in a single request.
+
+        Bitget supports stopLoss/takeProfit as part of the main order.
+        This avoids orphaned trigger orders when SL or TP gets hit.
+        """
+        params = {
+            "stopLoss": {
+                "triggerPrice": stop_loss,
+                "type": "market",
+            },
+            "takeProfit": {
+                "triggerPrice": take_profit,
+                "type": "market",
+            },
+        }
+        order = self.exchange.create_order(symbol, "market", side, amount, params=params)
+        logger.info(
+            f"Рыночный ордер {side} {amount} {symbol} c SL={stop_loss} TP={take_profit} -> {order['id']}"
+        )
+        return order
+
     def create_limit_order(self, symbol: str, side: str, amount: float, price: float, params: dict | None = None) -> dict:
         """Place a limit order."""
         params = params or {}

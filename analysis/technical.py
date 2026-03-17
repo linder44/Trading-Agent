@@ -1,5 +1,6 @@
 """Technical analysis module using ta library."""
 
+import numpy as np
 import pandas as pd
 import ta
 from loguru import logger
@@ -168,6 +169,182 @@ class TechnicalAnalyzer:
 
         return {"vpoc": round(vpoc, 6), "vah": round(vah, 6), "val": round(val, 6)}
 
+    @staticmethod
+    def compute_support_resistance(df: pd.DataFrame, lookbacks: tuple = (20, 50, 100)) -> dict:
+        """Detect support/resistance from swing highs and lows.
+
+        Uses multiple lookback windows to find levels at different scales.
+        Returns nearest levels above and below current price, plus key zones.
+        """
+        if len(df) < max(lookbacks):
+            return {"supports": [], "resistances": [], "key_levels": []}
+
+        price = float(df["close"].iloc[-1])
+        all_levels: list[dict] = []
+
+        for lb in lookbacks:
+            highs = df["high"].rolling(window=lb, center=True).max()
+            lows = df["low"].rolling(window=lb, center=True).min()
+
+            # Swing highs: where high equals rolling max
+            swing_high_mask = df["high"] == highs
+            for idx in df.index[swing_high_mask]:
+                level = float(df.loc[idx, "high"])
+                all_levels.append({"price": level, "type": "resistance", "lookback": lb})
+
+            # Swing lows: where low equals rolling min
+            swing_low_mask = df["low"] == lows
+            for idx in df.index[swing_low_mask]:
+                level = float(df.loc[idx, "low"])
+                all_levels.append({"price": level, "type": "support", "lookback": lb})
+
+        # Cluster nearby levels (within 0.3% of each other)
+        if not all_levels:
+            return {"supports": [], "resistances": [], "key_levels": []}
+
+        all_levels.sort(key=lambda x: x["price"])
+        clusters: list[dict] = []
+        cluster_threshold = price * 0.003
+
+        current_cluster = [all_levels[0]]
+        for level in all_levels[1:]:
+            if level["price"] - current_cluster[-1]["price"] < cluster_threshold:
+                current_cluster.append(level)
+            else:
+                avg_price = sum(l["price"] for l in current_cluster) / len(current_cluster)
+                clusters.append({
+                    "price": round(avg_price, 6),
+                    "strength": len(current_cluster),
+                    "type": "support" if avg_price < price else "resistance",
+                })
+                current_cluster = [level]
+        # Last cluster
+        avg_price = sum(l["price"] for l in current_cluster) / len(current_cluster)
+        clusters.append({
+            "price": round(avg_price, 6),
+            "strength": len(current_cluster),
+            "type": "support" if avg_price < price else "resistance",
+        })
+
+        supports = sorted([c for c in clusters if c["price"] < price], key=lambda x: -x["price"])[:5]
+        resistances = sorted([c for c in clusters if c["price"] >= price], key=lambda x: x["price"])[:5]
+        key_levels = sorted(clusters, key=lambda x: -x["strength"])[:8]
+
+        return {
+            "supports": supports,
+            "resistances": resistances,
+            "key_levels": key_levels,
+        }
+
+    @staticmethod
+    def detect_order_blocks(df: pd.DataFrame, lookback: int = 50) -> list[dict]:
+        """Detect order blocks (institutional buy/sell zones).
+
+        An order block is the last opposite candle before a strong impulsive move.
+        - Bullish OB: last bearish candle before a strong bullish move (buy zone)
+        - Bearish OB: last bullish candle before a strong bearish move (sell zone)
+        """
+        if len(df) < lookback + 3:
+            return []
+
+        blocks = []
+        atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and not pd.isna(df["atr"].iloc[-1]) else None
+        if not atr:
+            atr = float((df["high"] - df["low"]).rolling(14).mean().iloc[-1])
+
+        recent = df.iloc[-lookback:]
+        threshold = atr * 2  # Strong move = 2x ATR
+
+        for i in range(1, len(recent) - 2):
+            curr = recent.iloc[i]
+            nxt = recent.iloc[i + 1]
+            move = nxt["close"] - curr["close"]
+
+            # Bullish OB: bearish candle followed by strong bullish move
+            if curr["close"] < curr["open"] and move > threshold:
+                blocks.append({
+                    "type": "bullish_ob",
+                    "zone_high": round(float(curr["open"]), 6),
+                    "zone_low": round(float(curr["close"]), 6),
+                    "strength": round(float(move / atr), 1),
+                })
+
+            # Bearish OB: bullish candle followed by strong bearish move
+            elif curr["close"] > curr["open"] and move < -threshold:
+                blocks.append({
+                    "type": "bearish_ob",
+                    "zone_high": round(float(curr["close"]), 6),
+                    "zone_low": round(float(curr["open"]), 6),
+                    "strength": round(float(abs(move) / atr), 1),
+                })
+
+        # Keep only the most recent and strongest blocks
+        bullish = sorted([b for b in blocks if b["type"] == "bullish_ob"], key=lambda x: -x["strength"])[:3]
+        bearish = sorted([b for b in blocks if b["type"] == "bearish_ob"], key=lambda x: -x["strength"])[:3]
+        return bullish + bearish
+
+    @staticmethod
+    def detect_liquidity_zones(df: pd.DataFrame, lookback: int = 100) -> list[dict]:
+        """Detect liquidity clusters — areas where many stop losses likely sit.
+
+        Liquidity pools form:
+        - Below equal lows (stop loss hunt zone for longs)
+        - Above equal highs (stop loss hunt zone for shorts)
+        - Below/above consolidation ranges (breakout liquidity)
+        """
+        if len(df) < lookback:
+            return []
+
+        recent = df.iloc[-lookback:]
+        price = float(df["close"].iloc[-1])
+        atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and not pd.isna(df["atr"].iloc[-1]) else float((df["high"] - df["low"]).rolling(14).mean().iloc[-1])
+        tolerance = atr * 0.3
+        zones = []
+
+        # Equal lows: liquidity sitting below
+        lows = recent["low"].values
+        for i in range(len(lows)):
+            equal_count = 0
+            for j in range(i + 1, len(lows)):
+                if abs(lows[j] - lows[i]) < tolerance:
+                    equal_count += 1
+            if equal_count >= 2:
+                level = float(lows[i])
+                zones.append({
+                    "type": "buy_liquidity",
+                    "price": round(level, 6),
+                    "touches": equal_count + 1,
+                    "side": "below" if level < price else "above",
+                })
+
+        # Equal highs: liquidity sitting above
+        highs = recent["high"].values
+        for i in range(len(highs)):
+            equal_count = 0
+            for j in range(i + 1, len(highs)):
+                if abs(highs[j] - highs[i]) < tolerance:
+                    equal_count += 1
+            if equal_count >= 2:
+                level = float(highs[i])
+                zones.append({
+                    "type": "sell_liquidity",
+                    "price": round(level, 6),
+                    "touches": equal_count + 1,
+                    "side": "above" if level > price else "below",
+                })
+
+        # Deduplicate nearby zones
+        zones.sort(key=lambda x: x["price"])
+        deduped = []
+        for z in zones:
+            if not deduped or abs(z["price"] - deduped[-1]["price"]) > tolerance:
+                deduped.append(z)
+            elif z["touches"] > deduped[-1]["touches"]:
+                deduped[-1] = z
+
+        # Return closest zones to current price
+        return sorted(deduped, key=lambda x: abs(x["price"] - price))[:8]
+
     def generate_summary(self, df: pd.DataFrame, symbol: str) -> dict:
         """Generate a human-readable analysis summary for Claude."""
         if df.empty or len(df) < 50:
@@ -235,6 +412,13 @@ class TechnicalAnalyzer:
                 "above" if not pd.isna(latest.get("vpoc", float("nan"))) and latest["close"] > latest["vpoc"]
                 else "below" if not pd.isna(latest.get("vpoc", float("nan"))) else None
             ),
+
+            # Support/Resistance levels
+            "sr_levels": self.compute_support_resistance(df),
+            # Order blocks (institutional zones)
+            "order_blocks": self.detect_order_blocks(df),
+            # Liquidity zones (stop hunt areas)
+            "liquidity_zones": self.detect_liquidity_zones(df),
         }
 
         logger.debug(f"Analysis summary for {symbol}: RSI={summary['rsi']}, trend={summary['trend_short']}")

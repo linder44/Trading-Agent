@@ -435,18 +435,6 @@ class TradingAgent:
                 if new_sl:
                     result = self.orders.update_stop_loss(symbol, new_sl)
 
-            elif action == "limit_buy":
-                limit_price = params.get("limit_price")
-                if limit_price:
-                    amount = self.risk.calculate_position_size(balance, limit_price, limit_price * 0.97)
-                    result = self.orders.place_limit_order(symbol, "buy", amount, limit_price)
-
-            elif action == "limit_sell":
-                limit_price = params.get("limit_price")
-                if limit_price:
-                    amount = self.risk.calculate_position_size(balance, limit_price, limit_price * 1.03)
-                    result = self.orders.place_limit_order(symbol, "sell", amount, limit_price)
-
             elif action == "trigger_long":
                 trigger_price = params.get("trigger_price")
                 if trigger_price:
