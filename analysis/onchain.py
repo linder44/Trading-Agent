@@ -6,6 +6,8 @@ Fetches data that is not available from standard OHLCV:
 - Long/short ratio (positioning of accounts)
 - Whale detection (large trades on Bitget futures)
 - Exchange inflows/outflows (order book imbalance)
+
+All HTTP calls use request_with_retry (3 attempts, 5s timeout each).
 """
 
 import time
@@ -14,67 +16,43 @@ from datetime import datetime
 import requests
 from loguru import logger
 
+from utils.http import request_with_retry
+
 
 class OnChainAnalyzer:
     """Fetches on-chain and derivatives market data."""
+
+    BITGET_BASE = "https://api.bitget.com/api/v2/mix/market"
 
     def __init__(self):
         self._cache: dict = {}
         self._cache_ttl = 300  # 5 min
 
     def get_funding_rate(self, exchange_client, symbol: str) -> dict:
-        """Get current funding rate using Bitget REST API directly.
-
-        Positive = longs pay shorts (market is long-heavy, potential top)
-        Negative = shorts pay longs (market is short-heavy, potential bottom)
-        """
+        """Get current funding rate using Bitget REST API directly."""
         base_coin = symbol.split("/")[0]
         cache_key = f"funding_{base_coin}"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        # Bitget public REST API — не требует load_markets()
-        try:
-            resp = requests.get(
-                "https://api.bitget.com/api/v2/mix/market/current-fund-rate",
-                params={
-                    "symbol": f"{base_coin}USDT",
-                    "productType": "USDT-FUTURES",
-                },
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                api_data = resp.json().get("data", [])
-                if api_data:
-                    item = api_data[0] if isinstance(api_data, list) else api_data
-                    rate = float(item.get("fundingRate", 0))
-                    result = {
-                        "funding_rate": round(rate, 6),
-                        "funding_rate_pct": round(rate * 100, 4),
-                        "sentiment": "extreme_greed" if rate > 0.001 else (
-                            "bullish" if rate > 0 else (
-                                "extreme_fear" if rate < -0.001 else "bearish"
-                            )
-                        ),
-                    }
-                    self._set_cache(cache_key, result)
-                    return result
-        except Exception as e:
-            logger.warning(f"Funding rate REST failed for {base_coin}: {e}")
+        resp = request_with_retry(
+            f"{self.BITGET_BASE}/current-fund-rate",
+            params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
+        )
+        if resp:
+            api_data = resp.json().get("data", [])
+            if api_data:
+                item = api_data[0] if isinstance(api_data, list) else api_data
+                rate = float(item.get("fundingRate", 0))
+                result = self._format_funding(rate)
+                self._set_cache(cache_key, result)
+                return result
 
-        # Fallback: ccxt (если REST недоступен)
+        # Fallback: ccxt
         try:
             funding = exchange_client.exchange.fetch_funding_rate(symbol)
             rate = float(funding.get("fundingRate", 0))
-            result = {
-                "funding_rate": round(rate, 6),
-                "funding_rate_pct": round(rate * 100, 4),
-                "sentiment": "extreme_greed" if rate > 0.001 else (
-                    "bullish" if rate > 0 else (
-                        "extreme_fear" if rate < -0.001 else "bearish"
-                    )
-                ),
-            }
+            result = self._format_funding(rate)
             self._set_cache(cache_key, result)
             return result
         except Exception as e:
@@ -83,59 +61,38 @@ class OnChainAnalyzer:
         return {"funding_rate": 0, "funding_rate_pct": 0, "sentiment": "unknown"}
 
     def get_open_interest(self, exchange_client, symbol: str) -> dict:
-        """Get open interest data via Bitget REST API.
-
-        Rising OI + Rising price = strong trend (new money entering)
-        Rising OI + Falling price = bearish pressure
-        Falling OI + Rising price = short squeeze / weak rally
-        Falling OI + Falling price = capitulation
-        """
+        """Get open interest data via Bitget REST API."""
         base_coin = symbol.split("/")[0]
         cache_key = f"oi_{base_coin}"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        # Bitget REST API — не зависит от load_markets()
-        try:
-            resp = requests.get(
-                "https://api.bitget.com/api/v2/mix/market/open-interest",
-                params={
-                    "symbol": f"{base_coin}USDT",
-                    "productType": "USDT-FUTURES",
-                },
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                api_data = resp.json().get("data", {})
-                # Bitget v2: данные в openInterestList[0]["size"]
-                oi_list = api_data.get("openInterestList", [])
-                if oi_list:
-                    amount = float(oi_list[0].get("size", 0))
-                    result = {
-                        "open_interest_amount": round(amount, 4),
-                        "open_interest_value_usd": 0,
-                    }
-                    # Получаем цену для расчёта USD value
-                    try:
-                        ticker = exchange_client.exchange.fetch_ticker(symbol)
-                        price = float(ticker.get("last", 0))
-                        if price > 0:
-                            result["open_interest_value_usd"] = round(amount * price, 2)
-                    except Exception:
-                        pass
-                    self._set_cache(cache_key, result)
-                    return result
-        except Exception as e:
-            logger.warning(f"Open interest REST failed for {base_coin}: {e}")
+        resp = request_with_retry(
+            f"{self.BITGET_BASE}/open-interest",
+            params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
+        )
+        if resp:
+            api_data = resp.json().get("data", {})
+            oi_list = api_data.get("openInterestList", [])
+            if oi_list:
+                amount = float(oi_list[0].get("size", 0))
+                result = {"open_interest_amount": round(amount, 4), "open_interest_value_usd": 0}
+                try:
+                    ticker = exchange_client.exchange.fetch_ticker(symbol)
+                    price = float(ticker.get("last", 0))
+                    if price > 0:
+                        result["open_interest_value_usd"] = round(amount * price, 2)
+                except Exception:
+                    pass
+                self._set_cache(cache_key, result)
+                return result
 
         # Fallback: ccxt
         try:
             oi = exchange_client.exchange.fetch_open_interest(symbol)
-            oi_value = float(oi.get("openInterestValue") or 0)
-            oi_amount = float(oi.get("openInterestAmount") or 0)
             result = {
-                "open_interest_value_usd": round(oi_value, 2),
-                "open_interest_amount": round(oi_amount, 4),
+                "open_interest_value_usd": round(float(oi.get("openInterestValue") or 0), 2),
+                "open_interest_amount": round(float(oi.get("openInterestAmount") or 0), 4),
             }
             self._set_cache(cache_key, result)
             return result
@@ -145,103 +102,72 @@ class OnChainAnalyzer:
         return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
-        """Get long/short ratio using Bitget public API directly.
-
-        Ratio > 1 = more longs than shorts
-        Extreme ratios often signal reversals (contrarian indicator)
-        """
+        """Get long/short ratio using Bitget public API directly."""
         base_coin = symbol.split("/")[0]
         cache_key = f"ls_ratio_{base_coin}"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        # Bitget public API — no auth required
-        try:
-            resp = requests.get(
-                "https://api.bitget.com/api/v2/mix/market/account-long-short",
-                params={
-                    "symbol": f"{base_coin}USDT",
-                    "period": "5m",
-                    "productType": "USDT-FUTURES",
-                },
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                api_data = resp.json().get("data", [])
-                if api_data:
-                    latest = api_data[-1] if isinstance(api_data, list) else api_data
-                    long_ratio = float(latest.get("longAccountRatio", 0.5))
-                    short_ratio = float(latest.get("shortAccountRatio", 0.5))
-                    ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
-                    result = {
-                        "long_pct": round(long_ratio * 100, 1),
-                        "short_pct": round(short_ratio * 100, 1),
-                        "ratio": round(ratio, 2),
-                        "signal": "contrarian_bearish" if ratio > 2.0 else (
-                            "contrarian_bullish" if ratio < 0.5 else "neutral"
-                        ),
-                    }
-                    self._set_cache(cache_key, result)
-                    return result
-            else:
-                logger.warning(f"Bitget long/short API returned {resp.status_code} for {base_coin}")
-        except Exception as e:
-            logger.warning(f"Long/short ratio fetch failed for {base_coin}: {e}")
+        resp = request_with_retry(
+            f"{self.BITGET_BASE}/account-long-short",
+            params={"symbol": f"{base_coin}USDT", "period": "5m", "productType": "USDT-FUTURES"},
+        )
+        if resp:
+            api_data = resp.json().get("data", [])
+            if api_data:
+                latest = api_data[-1] if isinstance(api_data, list) else api_data
+                long_ratio = float(latest.get("longAccountRatio", 0.5))
+                short_ratio = float(latest.get("shortAccountRatio", 0.5))
+                ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
+                result = {
+                    "long_pct": round(long_ratio * 100, 1),
+                    "short_pct": round(short_ratio * 100, 1),
+                    "ratio": round(ratio, 2),
+                    "signal": "contrarian_bearish" if ratio > 2.0 else (
+                        "contrarian_bullish" if ratio < 0.5 else "neutral"
+                    ),
+                }
+                self._set_cache(cache_key, result)
+                return result
 
         return {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 
     def get_whale_alerts(self, exchange_client=None) -> list[dict]:
-        """Detect large trades on Bitget (whale activity proxy).
-
-        Uses Bitget recent fills API to find abnormally large trades.
-        More reliable than blockchain.info which often times out.
-        """
+        """Detect large trades on Bitget (whale activity proxy)."""
         cache_key = "whale_alerts"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
         large_trades = []
 
-        # Метод 1: Bitget REST API — последние сделки на BTC фьючерсах
-        try:
-            resp = requests.get(
-                "https://api.bitget.com/api/v2/mix/market/fills",
-                params={
-                    "symbol": "BTCUSDT",
-                    "productType": "USDT-FUTURES",
-                    "limit": "100",
-                },
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                fills = resp.json().get("data", [])
-                if fills:
-                    # Считаем средний объём, ищем аномально крупные
-                    sizes = [float(f.get("size", 0)) for f in fills if float(f.get("size", 0)) > 0]
-                    if sizes:
-                        avg_size = sum(sizes) / len(sizes)
-                        threshold = avg_size * 5  # 5x среднего = "кит"
+        resp = request_with_retry(
+            f"{self.BITGET_BASE}/fills",
+            params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "limit": "50"},
+        )
+        if resp:
+            fills = resp.json().get("data", [])
+            if fills:
+                sizes = [float(f.get("size", 0)) for f in fills if float(f.get("size", 0)) > 0]
+                if sizes:
+                    avg_size = sum(sizes) / len(sizes)
+                    threshold = avg_size * 5
+                    for f in fills:
+                        size = float(f.get("size", 0))
+                        if size >= threshold:
+                            large_trades.append({
+                                "symbol": "BTC",
+                                "size_contracts": size,
+                                "side": f.get("side", "unknown"),
+                                "price": float(f.get("price", 0)),
+                                "ratio_to_avg": round(size / avg_size, 1),
+                                "type": "whale_trade",
+                            })
+                        if len(large_trades) >= 10:
+                            break
+                    self._set_cache(cache_key, large_trades)
+                    return large_trades
 
-                        for f in fills:
-                            size = float(f.get("size", 0))
-                            if size >= threshold:
-                                large_trades.append({
-                                    "symbol": "BTC",
-                                    "size_contracts": size,
-                                    "side": f.get("side", "unknown"),
-                                    "price": float(f.get("price", 0)),
-                                    "ratio_to_avg": round(size / avg_size, 1),
-                                    "type": "whale_trade",
-                                })
-                            if len(large_trades) >= 10:
-                                break
-
-                        self._set_cache(cache_key, large_trades)
-                        return large_trades
-        except Exception as e:
-            logger.warning(f"Whale detection (Bitget fills) failed: {e}")
-
-        # Метод 2: order book — крупные заявки как прокси
+        # Fallback: order book large orders
         if exchange_client:
             try:
                 ob = exchange_client.exchange.fetch_order_book("BTC/USDT:USDT", limit=50)
@@ -252,11 +178,8 @@ class OnChainAnalyzer:
                     for price, vol, side in all_orders:
                         if vol >= avg_vol * 5:
                             large_trades.append({
-                                "symbol": "BTC",
-                                "size_btc": round(vol, 4),
-                                "price": price,
-                                "side": side,
-                                "type": "whale_order",
+                                "symbol": "BTC", "size_btc": round(vol, 4),
+                                "price": price, "side": side, "type": "whale_order",
                             })
                         if len(large_trades) >= 10:
                             break
@@ -267,66 +190,36 @@ class OnChainAnalyzer:
         return large_trades
 
     def get_exchange_netflow(self, exchange_client) -> dict:
-        """Estimate exchange flow direction from order book imbalance.
-
-        Uses bid/ask volume ratio as a proxy for flow direction:
-        - More bids than asks = accumulation (buying pressure)
-        - More asks than bids = selling pressure
-        """
+        """Estimate exchange flow direction from order book imbalance."""
         cache_key = "exchange_netflow"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        # Bitget REST API — merge-depth (не зависит от load_markets)
-        try:
-            resp = requests.get(
-                "https://api.bitget.com/api/v2/mix/market/merge-depth",
-                params={
-                    "symbol": "BTCUSDT",
-                    "productType": "USDT-FUTURES",
-                    "limit": "50",
-                },
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                ob = resp.json().get("data", {})
-                bids = ob.get("bids", [])
-                asks = ob.get("asks", [])
-                if bids and asks:
-                    bid_volume = sum(float(b[1]) for b in bids)
-                    ask_volume = sum(float(a[1]) for a in asks)
-                    total = bid_volume + ask_volume
-                    if total > 0:
-                        bid_ratio = bid_volume / total
-                        result = {
-                            "bid_volume_btc": round(bid_volume, 2),
-                            "ask_volume_btc": round(ask_volume, 2),
-                            "bid_ratio": round(bid_ratio, 3),
-                            "signal": "accumulation" if bid_ratio > 0.55 else (
-                                "selling_pressure" if bid_ratio < 0.45 else "balanced"
-                            ),
-                        }
-                        self._set_cache(cache_key, result)
-                        return result
-        except Exception as e:
-            logger.warning(f"Exchange netflow REST failed: {e}")
+        resp = request_with_retry(
+            f"{self.BITGET_BASE}/merge-depth",
+            params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "limit": "50"},
+        )
+        if resp:
+            ob = resp.json().get("data", {})
+            bids = ob.get("bids", [])
+            asks = ob.get("asks", [])
+            if bids and asks:
+                result = self._calc_netflow(
+                    sum(float(b[1]) for b in bids),
+                    sum(float(a[1]) for a in asks),
+                )
+                if result:
+                    self._set_cache(cache_key, result)
+                    return result
 
         # Fallback: ccxt
         try:
             ob = exchange_client.exchange.fetch_order_book("BTC/USDT:USDT", limit=50)
-            bid_volume = sum(b[1] for b in ob.get("bids", []))
-            ask_volume = sum(a[1] for a in ob.get("asks", []))
-            total = bid_volume + ask_volume
-            if total > 0:
-                bid_ratio = bid_volume / total
-                result = {
-                    "bid_volume_btc": round(bid_volume, 2),
-                    "ask_volume_btc": round(ask_volume, 2),
-                    "bid_ratio": round(bid_ratio, 3),
-                    "signal": "accumulation" if bid_ratio > 0.55 else (
-                        "selling_pressure" if bid_ratio < 0.45 else "balanced"
-                    ),
-                }
+            result = self._calc_netflow(
+                sum(b[1] for b in ob.get("bids", [])),
+                sum(a[1] for a in ob.get("asks", [])),
+            )
+            if result:
                 self._set_cache(cache_key, result)
                 return result
         except Exception as e:
@@ -350,6 +243,35 @@ class OnChainAnalyzer:
         }
 
         return result
+
+    # ─── helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_funding(rate: float) -> dict:
+        return {
+            "funding_rate": round(rate, 6),
+            "funding_rate_pct": round(rate * 100, 4),
+            "sentiment": "extreme_greed" if rate > 0.001 else (
+                "bullish" if rate > 0 else (
+                    "extreme_fear" if rate < -0.001 else "bearish"
+                )
+            ),
+        }
+
+    @staticmethod
+    def _calc_netflow(bid_volume: float, ask_volume: float) -> dict | None:
+        total = bid_volume + ask_volume
+        if total <= 0:
+            return None
+        bid_ratio = bid_volume / total
+        return {
+            "bid_volume_btc": round(bid_volume, 2),
+            "ask_volume_btc": round(ask_volume, 2),
+            "bid_ratio": round(bid_ratio, 3),
+            "signal": "accumulation" if bid_ratio > 0.55 else (
+                "selling_pressure" if bid_ratio < 0.45 else "balanced"
+            ),
+        }
 
     def _is_cached(self, key: str) -> bool:
         if key in self._cache:

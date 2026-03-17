@@ -7,6 +7,7 @@ import requests
 from loguru import logger
 
 from config import NewsConfig
+from utils.http import request_with_retry
 
 
 class NewsFetcher:
@@ -30,7 +31,7 @@ class NewsFetcher:
             return self._cache[cache_key]["data"]
 
         try:
-            resp = requests.get(
+            resp = request_with_retry(
                 "https://newsapi.org/v2/everything",
                 params={
                     "q": query,
@@ -40,9 +41,9 @@ class NewsFetcher:
                     "language": "en",
                     "apiKey": self.cfg.api_key,
                 },
-                timeout=10,
             )
-            resp.raise_for_status()
+            if not resp:
+                return []
             articles = resp.json().get("articles", [])
             result = [
                 {
@@ -68,8 +69,9 @@ class NewsFetcher:
             return self._cache[cache_key]["data"]
 
         try:
-            resp = requests.get(self.COINGECKO_TRENDING, timeout=10)
-            resp.raise_for_status()
+            resp = request_with_retry(self.COINGECKO_TRENDING)
+            if not resp:
+                return []
             coins = resp.json().get("coins", [])
             result = [
                 {
@@ -93,8 +95,9 @@ class NewsFetcher:
             return self._cache[cache_key]["data"]
 
         try:
-            resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-            resp.raise_for_status()
+            resp = request_with_retry("https://api.alternative.me/fng/?limit=1")
+            if not resp:
+                return {"value": 50, "classification": "Neutral", "timestamp": ""}
             data = resp.json()["data"][0]
             result = {
                 "value": int(data["value"]),

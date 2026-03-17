@@ -12,6 +12,8 @@ from datetime import datetime
 import requests
 from loguru import logger
 
+from utils.http import request_with_retry
+
 
 class MarketCorrelations:
     """Fetches broader market data that correlates with crypto."""
@@ -31,11 +33,9 @@ class MarketCorrelations:
             return self._cache[cache_key]["data"]
 
         try:
-            resp = requests.get(
-                "https://api.coingecko.com/api/v3/global",
-                timeout=10,
-            )
-            resp.raise_for_status()
+            resp = request_with_retry("https://api.coingecko.com/api/v3/global")
+            if not resp:
+                return {"btc_dominance": 0, "signal": "unknown"}
             data = resp.json().get("data", {})
             market_cap_pct = data.get("market_cap_percentage", {})
 
@@ -68,8 +68,7 @@ class MarketCorrelations:
             return self._cache[cache_key]["data"]
 
         try:
-            # Get USDT and USDC data as stablecoin proxies
-            resp = requests.get(
+            resp = request_with_retry(
                 "https://api.coingecko.com/api/v3/simple/price",
                 params={
                     "ids": "tether,usd-coin",
@@ -78,9 +77,8 @@ class MarketCorrelations:
                     "include_24hr_vol": "true",
                     "include_24hr_change": "true",
                 },
-                timeout=10,
             )
-            if resp.status_code == 200:
+            if resp:
                 data = resp.json()
                 usdt = data.get("tether", {})
                 usdc = data.get("usd-coin", {})

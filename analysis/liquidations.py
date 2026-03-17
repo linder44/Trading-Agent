@@ -10,6 +10,8 @@ often mark local tops/bottoms. Claude uses this to:
 import requests
 from loguru import logger
 
+from utils.http import request_with_retry
+
 
 class LiquidationAnalyzer:
     """Fetches liquidation data from Bitget public API."""
@@ -22,18 +24,15 @@ class LiquidationAnalyzer:
         """
         base_coin = symbol.split("/")[0]
         try:
-            # Bitget position long/short — shows aggregate positioning
-            # When positions drop sharply, it indicates liquidations
-            resp = requests.get(
+            resp = request_with_retry(
                 "https://api.bitget.com/api/v2/mix/market/account-long-short",
                 params={
                     "symbol": f"{base_coin}USDT",
                     "period": "1h",
                     "productType": "USDT-FUTURES",
                 },
-                timeout=8,
             )
-            if resp.status_code == 200:
+            if resp:
                 data = resp.json().get("data", [])
                 if data and isinstance(data, list) and len(data) >= 2:
                     latest = data[-1]

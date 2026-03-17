@@ -11,6 +11,8 @@ from datetime import datetime
 import requests
 from loguru import logger
 
+from utils.http import request_with_retry
+
 
 class SocialSentiment:
     """Fetches social momentum and sector rotation data."""
@@ -30,11 +32,8 @@ class SocialSentiment:
             return self._cache[cache_key]["data"]
 
         try:
-            resp = requests.get(
-                "https://api.coingecko.com/api/v3/search/trending",
-                timeout=10,
-            )
-            if resp.status_code == 200:
+            resp = request_with_retry("https://api.coingecko.com/api/v3/search/trending")
+            if resp:
                 coins = resp.json().get("coins", [])
                 result = {
                     "trending_by_social": [
@@ -65,11 +64,8 @@ class SocialSentiment:
             return self._cache[cache_key]["data"]
 
         try:
-            resp = requests.get(
-                "https://api.coingecko.com/api/v3/coins/categories",
-                timeout=10,
-            )
-            if resp.status_code == 200:
+            resp = request_with_retry("https://api.coingecko.com/api/v3/coins/categories")
+            if resp:
                 categories = resp.json()
                 # Pick key sectors relevant to trading
                 key_sectors = {
