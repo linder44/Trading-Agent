@@ -149,65 +149,67 @@ class TestLiquidations(unittest.TestCase):
     def setUp(self):
         self.analyzer = LiquidationAnalyzer()
 
-    @patch("analysis.liquidations.requests.get")
-    def test_normal_market(self, mock_get):
+    def _make_resp(self, json_data):
+        resp = MagicMock()
+        resp.json.return_value = json_data
+        return resp
+
+    @patch("analysis.liquidations.request_with_retry")
+    def test_normal_market(self, mock_req):
         """No significant position changes = low stress."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "data": [
-                {"longAccountRatio": "0.500", "shortAccountRatio": "0.500"},
-                {"longAccountRatio": "0.501", "shortAccountRatio": "0.499"},
-            ]
-        }
-        mock_get.return_value = mock_resp
+        mock_req.return_value = self._make_resp([
+            {"longAccount": "0.500", "shortAccount": "0.500"},
+            {"longAccount": "0.501", "shortAccount": "0.499"},
+        ])
 
         result = self.analyzer.get_liquidations("BTC/USDT:USDT")
         self.assertEqual(result["stress_level"], "low")
         self.assertEqual(result["signal"], "normal")
 
-    @patch("analysis.liquidations.requests.get")
-    def test_long_liquidation_cascade(self, mock_get):
+    @patch("analysis.liquidations.request_with_retry")
+    def test_long_liquidation_cascade(self, mock_req):
         """Sharp drop in long positions = long liquidations."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "data": [
-                {"longAccountRatio": "0.60", "shortAccountRatio": "0.40"},
-                {"longAccountRatio": "0.45", "shortAccountRatio": "0.55"},
-            ]
-        }
-        mock_get.return_value = mock_resp
+        mock_req.return_value = self._make_resp([
+            {"longAccount": "0.60", "shortAccount": "0.40"},
+            {"longAccount": "0.45", "shortAccount": "0.55"},
+        ])
 
         result = self.analyzer.get_liquidations("BTC/USDT:USDT")
         self.assertGreater(result["long_liquidation_pressure"], 0)
         self.assertEqual(result["dominant_liquidation"], "longs")
 
-    @patch("analysis.liquidations.requests.get")
-    def test_api_failure_returns_default(self, mock_get):
-        mock_get.side_effect = Exception("timeout")
+    @patch("analysis.liquidations.request_with_retry")
+    def test_api_failure_returns_default(self, mock_req):
+        mock_req.side_effect = Exception("timeout")
         result = self.analyzer.get_liquidations("BTC/USDT:USDT")
         self.assertEqual(result["stress_level"], "unknown")
 
-    @patch("analysis.liquidations.requests.get")
-    def test_get_all_liquidations(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "data": [
-                {"longAccountRatio": "0.50", "shortAccountRatio": "0.50"},
-                {"longAccountRatio": "0.50", "shortAccountRatio": "0.50"},
-            ]
-        }
-        mock_get.return_value = mock_resp
+    @patch("analysis.liquidations.request_with_retry")
+    def test_get_all_liquidations(self, mock_req):
+        mock_req.return_value = self._make_resp([
+            {"longAccount": "0.50", "shortAccount": "0.50"},
+            {"longAccount": "0.50", "shortAccount": "0.50"},
+        ])
 
         result = self.analyzer.get_all_liquidations(["BTC/USDT:USDT", "ETH/USDT:USDT"])
         self.assertIn("BTC/USDT:USDT", result)
         self.assertIn("ETH/USDT:USDT", result)
 
+    @patch("analysis.liquidations.request_with_retry")
+    def test_binance_url_used(self, mock_req):
+        """Verify Binance endpoint is called, not Bitget."""
+        mock_req.return_value = self._make_resp([
+            {"longAccount": "0.50", "shortAccount": "0.50"},
+            {"longAccount": "0.50", "shortAccount": "0.50"},
+        ])
+        self.analyzer.get_liquidations("BTC/USDT:USDT")
+        call_url = mock_req.call_args[0][0]
+        self.assertIn("fapi.binance.com", call_url)
+        self.assertNotIn("bitget", call_url)
+
     def test_result_has_required_fields(self):
         """Even on failure, result should have all expected keys."""
-        with patch("analysis.liquidations.requests.get", side_effect=Exception("fail")):
+        with patch("analysis.liquidations.request_with_retry", side_effect=Exception("fail")):
             result = self.analyzer.get_liquidations("BTC/USDT:USDT")
         required = ["long_liquidation_pressure", "short_liquidation_pressure",
                      "dominant_liquidation", "stress_level", "signal"]

@@ -1,46 +1,51 @@
-"""Liquidation data module — fetches recent liquidation events.
+"""Liquidation data module — estimates liquidation pressure from position changes.
 
 Large liquidation cascades indicate forced selling/buying and
 often mark local tops/bottoms. Claude uses this to:
 - Detect squeeze conditions (mass liquidation = reversal likely)
 - Gauge market stress level
 - Avoid entering during liquidation cascades
+
+Uses Binance Futures globalLongShortAccountRatio (public, no keys needed).
+Compares the two most recent 5m snapshots to detect sharp position changes.
 """
 
-import requests
 from loguru import logger
 
-from utils.http import request_with_retry
+from utils.http import HttpClientError, request_with_retry
+
+BINANCE_FUTURES = "https://fapi.binance.com/futures/data"
 
 
 class LiquidationAnalyzer:
-    """Fetches liquidation data from Bitget public API."""
+    """Estimates liquidation pressure from Binance long/short position changes."""
 
     def get_liquidations(self, symbol: str) -> dict:
-        """Get recent liquidation data for a symbol.
+        """Get recent liquidation pressure for a symbol.
 
-        Uses Bitget public API for long/short position data as a proxy
-        for liquidation pressure (positions being force-closed).
+        Fetches 2 most recent 5-minute snapshots of global long/short ratio
+        from Binance. A sharp drop in long% = long liquidations, and vice versa.
         """
         base_coin = symbol.split("/")[0]
         try:
             resp = request_with_retry(
-                "https://api.bitget.com/api/v2/mix/market/account-long-short",
+                f"{BINANCE_FUTURES}/globalLongShortAccountRatio",
                 params={
                     "symbol": f"{base_coin}USDT",
-                    "period": "1h",
-                    "productType": "USDT-FUTURES",
+                    "period": "5m",
+                    "limit": "2",
                 },
+                timeout=10,
             )
             if resp:
-                data = resp.json().get("data", [])
+                data = resp.json()
                 if data and isinstance(data, list) and len(data) >= 2:
-                    latest = data[-1]
-                    prev = data[-2]
-                    long_now = float(latest.get("longAccountRatio", 0.5))
-                    long_prev = float(prev.get("longAccountRatio", 0.5))
-                    short_now = float(latest.get("shortAccountRatio", 0.5))
-                    short_prev = float(prev.get("shortAccountRatio", 0.5))
+                    prev = data[0]
+                    latest = data[1]
+                    long_now = float(latest.get("longAccount", 0.5))
+                    long_prev = float(prev.get("longAccount", 0.5))
+                    short_now = float(latest.get("shortAccount", 0.5))
+                    short_prev = float(prev.get("shortAccount", 0.5))
 
                     # Sharp drop in long positions = long liquidations
                     long_liq_pressure = max(0, (long_prev - long_now) * 100)
@@ -65,6 +70,8 @@ class LiquidationAnalyzer:
                             "normal"
                         ),
                     }
+        except HttpClientError as e:
+            logger.warning(f"Liquidation data 4xx for {base_coin}: {e}")
         except Exception as e:
             logger.warning(f"Liquidation data fetch failed for {base_coin}: {e}")
 

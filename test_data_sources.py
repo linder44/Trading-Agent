@@ -80,26 +80,43 @@ def test_fear_greed():
     return True
 
 
-def test_bitget_long_short():
-    """Test Bitget public long/short ratio API."""
+def test_binance_long_short():
+    """Test Binance Futures globalLongShortAccountRatio (public, no keys)."""
     resp = request_with_retry(
-        "https://api.bitget.com/api/v2/mix/market/account-long-short",
-        params={"symbol": "BTCUSDT", "period": "5m", "productType": "USDT-FUTURES"},
+        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+        params={"symbol": "BTCUSDT", "period": "1h", "limit": "1"},
+        timeout=10,
     )
     if not resp:
         return False
     data = resp.json()
-    if data.get("code") != "00000":
-        logger.error(f"  Bitget API error: {data.get('msg', 'unknown')}")
-        return False
-    items = data.get("data", [])
-    if items:
-        latest = items[-1]
-        long_r = float(latest.get("longAccountRatio", 0))
-        short_r = float(latest.get("shortAccountRatio", 0))
+    if data and isinstance(data, list):
+        latest = data[-1]
+        long_r = float(latest.get("longAccount", 0))
+        short_r = float(latest.get("shortAccount", 0))
         logger.info(f"  BTC Long/Short: {long_r*100:.1f}% / {short_r*100:.1f}%")
         return True
-    logger.warning("  Empty data from Bitget")
+    logger.warning("  Empty data from Binance")
+    return False
+
+
+def test_binance_liquidation_proxy():
+    """Test Binance long/short ratio for liquidation pressure (5m snapshots)."""
+    resp = request_with_retry(
+        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+        params={"symbol": "BTCUSDT", "period": "5m", "limit": "2"},
+        timeout=10,
+    )
+    if not resp:
+        return False
+    data = resp.json()
+    if data and isinstance(data, list) and len(data) >= 2:
+        prev_long = float(data[0].get("longAccount", 0.5))
+        curr_long = float(data[1].get("longAccount", 0.5))
+        change = abs(prev_long - curr_long) * 100
+        logger.info(f"  BTC position change (5m): {change:.2f}pp")
+        return True
+    logger.warning("  Not enough data from Binance")
     return False
 
 
@@ -126,10 +143,11 @@ def test_bitget_funding():
 
 
 def test_bitget_open_interest():
-    """Test Bitget open interest via REST API."""
+    """Test Bitget open interest via REST API (15s timeout)."""
     resp = request_with_retry(
         "https://api.bitget.com/api/v2/mix/market/open-interest",
         params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES"},
+        timeout=15,
     )
     if not resp:
         return False
@@ -220,11 +238,27 @@ def test_coingecko_categories():
     return len(found) > 0
 
 
+def test_cryptopanic():
+    """Test CryptoPanic free API (no key needed)."""
+    resp = request_with_retry(
+        "https://cryptopanic.com/api/free/v1/posts/",
+        params={"public": "true", "kind": "news", "filter": "hot"},
+        timeout=10,
+    )
+    if not resp:
+        return False
+    posts = resp.json().get("results", [])
+    logger.info(f"  Got {len(posts)} posts")
+    if posts:
+        logger.info(f"  Latest: {posts[0].get('title', '')[:80]}")
+    return len(posts) > 0
+
+
 def test_newsapi():
     """Test NewsAPI (requires NEWS_API_KEY in .env)."""
     key = os.getenv("NEWS_API_KEY", "")
     if not key:
-        logger.warning("  SKIP: NEWS_API_KEY not set. Get free key at https://newsapi.org/register")
+        logger.warning("  SKIP: NEWS_API_KEY not set (optional fallback, CryptoPanic is primary)")
         return None
     resp = request_with_retry(
         "https://newsapi.org/v2/everything",
@@ -260,7 +294,8 @@ def main():
             ("Fear & Greed Index", test_fear_greed),
         ],
         "onchain": [
-            ("Bitget Long/Short Ratio (REST)", test_bitget_long_short),
+            ("Binance Long/Short Ratio", test_binance_long_short),
+            ("Binance Liquidation Proxy (5m)", test_binance_liquidation_proxy),
             ("Bitget Funding Rate (REST)", test_bitget_funding),
             ("Bitget Open Interest (REST)", test_bitget_open_interest),
             ("Bitget Order Book (REST)", test_bitget_orderbook),
@@ -271,7 +306,8 @@ def main():
             ("CoinGecko Categories (sectors)", test_coingecko_categories),
         ],
         "news": [
-            ("NewsAPI", test_newsapi),
+            ("CryptoPanic (free)", test_cryptopanic),
+            ("NewsAPI (optional)", test_newsapi),
         ],
     }
 

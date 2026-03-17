@@ -76,6 +76,7 @@ class OnChainAnalyzer:
             resp = request_with_retry(
                 f"{self.BITGET_BASE}/open-interest",
                 params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
+                timeout=15,
             )
         except HttpClientError:
             resp = None
@@ -109,7 +110,7 @@ class OnChainAnalyzer:
 
         return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
-    _LS_DEFAULT = {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
+    _LS_DEFAULT = {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral", "_source": "default"}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
         """Get global long/short account ratio via Binance Futures public API.
@@ -152,6 +153,7 @@ class OnChainAnalyzer:
                     "short_pct": round(short_ratio * 100, 1),
                     "ratio": round(ratio, 2),
                     "signal": self._ls_signal(ratio),
+                    "_source": "ccxt",
                 }
                 self._set_cache(cache_key, result)
                 return result
@@ -179,6 +181,7 @@ class OnChainAnalyzer:
             "signal": "contrarian_bearish" if ratio > 2.0 else (
                 "contrarian_bullish" if ratio < 0.5 else "neutral"
             ),
+            "_source": "binance",
         }
 
     @staticmethod

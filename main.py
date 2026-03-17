@@ -241,7 +241,7 @@ class TradingAgent:
                 sample = onchain_data[symbol_keys[0]]
                 sources["funding_rates"] = sample.get("funding_rate", {}).get("sentiment", "unknown") != "unknown"
                 sources["open_interest"] = sample.get("open_interest", {}).get("open_interest_value_usd", 0) > 0
-                sources["long_short_ratio"] = sample.get("long_short_ratio", {}).get("signal", "neutral") != "neutral" or sample.get("long_short_ratio", {}).get("ratio", 1.0) != 1.0
+                sources["long_short_ratio"] = sample.get("long_short_ratio", {}).get("_source", "default") != "default"
         else:
             sources["funding_rates"] = False
             sources["open_interest"] = False

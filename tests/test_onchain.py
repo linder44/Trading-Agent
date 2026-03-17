@@ -53,6 +53,7 @@ class TestLongShortRatioBinance(unittest.TestCase):
         self.assertEqual(result["short_pct"], 48.4)
         self.assertEqual(result["ratio"], 1.07)
         self.assertEqual(result["signal"], "neutral")
+        self.assertEqual(result["_source"], "binance")
         # Verify Binance URL was called
         call_url = mock_req.call_args[0][0]
         self.assertIn("fapi.binance.com", call_url)
@@ -184,6 +185,7 @@ class TestLongShortRatioFallback(unittest.TestCase):
 
         self.assertEqual(result["long_pct"], 65.0)
         self.assertEqual(result["short_pct"], 35.0)
+        self.assertEqual(result["_source"], "ccxt")
 
     @patch("analysis.onchain.request_with_retry")
     def test_binance_400_ccxt_fallback(self, mock_req):
@@ -207,7 +209,7 @@ class TestLongShortRatioFallback(unittest.TestCase):
 
         result = self.analyzer.get_long_short_ratio(self.mock_exchange, "XRP/USDT:USDT")
 
-        self.assertEqual(result, {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"})
+        self.assertEqual(result, {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral", "_source": "default"})
 
     @patch("analysis.onchain.request_with_retry")
     def test_no_bitget_calls(self, mock_req):
@@ -234,6 +236,7 @@ class TestParseBinanceLs(unittest.TestCase):
         self.assertEqual(result["short_pct"], 48.4)
         self.assertEqual(result["ratio"], 1.07)
         self.assertEqual(result["signal"], "neutral")
+        self.assertEqual(result["_source"], "binance")
 
     def test_extreme_long(self):
         item = {"longAccount": "0.85", "shortAccount": "0.15", "longShortRatio": "5.6667"}
@@ -261,6 +264,22 @@ class TestParseBinanceLs(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════
 # FUNDING RATE
 # ═══════════════════════════════════════════════════════════════════
+
+class TestOpenInterestTimeout(unittest.TestCase):
+    """Open interest uses 15s timeout (not default 5s)."""
+
+    def setUp(self):
+        self.analyzer = OnChainAnalyzer()
+        self.mock_exchange = MagicMock()
+
+    @patch("analysis.onchain.request_with_retry")
+    def test_uses_15s_timeout(self, mock_req):
+        mock_req.return_value = _make_response({"data": {"openInterestList": [{"size": "100"}]}})
+        self.mock_exchange.exchange.fetch_ticker.return_value = {"last": 50000}
+        self.analyzer.get_open_interest(self.mock_exchange, "BTC/USDT:USDT")
+        _, kwargs = mock_req.call_args
+        self.assertEqual(kwargs.get("timeout"), 15)
+
 
 class TestFundingRate(unittest.TestCase):
 
