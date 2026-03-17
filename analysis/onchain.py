@@ -16,7 +16,7 @@ from datetime import datetime
 import requests
 from loguru import logger
 
-from utils.http import request_with_retry
+from utils.http import HttpClientError, request_with_retry
 
 
 class OnChainAnalyzer:
@@ -27,6 +27,7 @@ class OnChainAnalyzer:
     def __init__(self):
         self._cache: dict = {}
         self._cache_ttl = 300  # 5 min
+        self._unsupported_ls_symbols: set[str] = set()  # symbols that 400 on account-long-short
 
     def get_funding_rate(self, exchange_client, symbol: str) -> dict:
         """Get current funding rate using Bitget REST API directly."""
@@ -35,11 +36,14 @@ class OnChainAnalyzer:
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        resp = request_with_retry(
-            f"{self.BITGET_BASE}/current-fund-rate",
-            params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
-            timeout=15,
-        )
+        try:
+            resp = request_with_retry(
+                f"{self.BITGET_BASE}/current-fund-rate",
+                params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
+                timeout=15,
+            )
+        except HttpClientError:
+            resp = None
         if resp:
             api_data = resp.json().get("data", [])
             if api_data:
@@ -68,10 +72,13 @@ class OnChainAnalyzer:
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        resp = request_with_retry(
-            f"{self.BITGET_BASE}/open-interest",
-            params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
-        )
+        try:
+            resp = request_with_retry(
+                f"{self.BITGET_BASE}/open-interest",
+                params={"symbol": f"{base_coin}USDT", "productType": "USDT-FUTURES"},
+            )
+        except HttpClientError:
+            resp = None
         if resp:
             api_data = resp.json().get("data", {})
             oi_list = api_data.get("openInterestList", [])
@@ -103,6 +110,7 @@ class OnChainAnalyzer:
         return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
     _LS_PERIODS = ("5m", "15m", "1h")
+    _LS_DEFAULT = {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
         """Get long/short ratio using Bitget public API directly."""
@@ -111,30 +119,28 @@ class OnChainAnalyzer:
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        # Bitget не поддерживает все периоды для всех символов — пробуем несколько
-        for period in self._LS_PERIODS:
-            resp = request_with_retry(
-                f"{self.BITGET_BASE}/account-long-short",
-                params={"symbol": f"{base_coin}USDT", "period": period, "productType": "USDT-FUTURES"},
-                retries=1,
-            )
-            if resp:
-                api_data = resp.json().get("data", [])
-                if api_data:
-                    latest = api_data[-1] if isinstance(api_data, list) else api_data
-                    long_ratio = float(latest.get("longAccountRatio", 0.5))
-                    short_ratio = float(latest.get("shortAccountRatio", 0.5))
-                    ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
-                    result = {
-                        "long_pct": round(long_ratio * 100, 1),
-                        "short_pct": round(short_ratio * 100, 1),
-                        "ratio": round(ratio, 2),
-                        "signal": "contrarian_bearish" if ratio > 2.0 else (
-                            "contrarian_bullish" if ratio < 0.5 else "neutral"
-                        ),
-                    }
-                    self._set_cache(cache_key, result)
-                    return result
+        # Символ уже помечен как неподдерживаемый — сразу в ccxt fallback
+        if base_coin not in self._unsupported_ls_symbols:
+            for period in self._LS_PERIODS:
+                try:
+                    resp = request_with_retry(
+                        f"{self.BITGET_BASE}/account-long-short",
+                        params={"symbol": f"{base_coin}USDT", "period": period,
+                                "productType": "USDT-FUTURES"},
+                        retries=1,
+                    )
+                except HttpClientError:
+                    # 400 = символ не поддерживается Bitget для long/short,
+                    # остальные периоды тоже не помогут — выходим из цикла
+                    logger.debug(f"Long/short ratio not supported for {base_coin} on Bitget")
+                    self._unsupported_ls_symbols.add(base_coin)
+                    break
+                if resp:
+                    api_data = resp.json().get("data", [])
+                    if api_data:
+                        result = self._parse_ls_ratio(api_data)
+                        self._set_cache(cache_key, result)
+                        return result
 
         # Fallback: ccxt
         try:
@@ -147,16 +153,34 @@ class OnChainAnalyzer:
                     "long_pct": round(long_ratio * 100, 1),
                     "short_pct": round(short_ratio * 100, 1),
                     "ratio": round(ratio, 2),
-                    "signal": "contrarian_bearish" if ratio > 2.0 else (
-                        "contrarian_bullish" if ratio < 0.5 else "neutral"
-                    ),
+                    "signal": self._ls_signal(ratio),
                 }
                 self._set_cache(cache_key, result)
                 return result
         except Exception as e:
             logger.debug(f"Long/short ratio ccxt fallback failed for {symbol}: {e}")
 
-        return {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
+        return self._LS_DEFAULT.copy()
+
+    def _parse_ls_ratio(self, api_data) -> dict:
+        latest = api_data[-1] if isinstance(api_data, list) else api_data
+        long_ratio = float(latest.get("longAccountRatio", 0.5))
+        short_ratio = float(latest.get("shortAccountRatio", 0.5))
+        ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
+        return {
+            "long_pct": round(long_ratio * 100, 1),
+            "short_pct": round(short_ratio * 100, 1),
+            "ratio": round(ratio, 2),
+            "signal": self._ls_signal(ratio),
+        }
+
+    @staticmethod
+    def _ls_signal(ratio: float) -> str:
+        if ratio > 2.0:
+            return "contrarian_bearish"
+        if ratio < 0.5:
+            return "contrarian_bullish"
+        return "neutral"
 
     def get_whale_alerts(self, exchange_client=None) -> list[dict]:
         """Detect large trades on Bitget (whale activity proxy)."""
@@ -166,10 +190,13 @@ class OnChainAnalyzer:
 
         large_trades = []
 
-        resp = request_with_retry(
-            f"{self.BITGET_BASE}/fills",
-            params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "limit": "50"},
-        )
+        try:
+            resp = request_with_retry(
+                f"{self.BITGET_BASE}/fills",
+                params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "limit": "50"},
+            )
+        except HttpClientError:
+            resp = None
         if resp:
             fills = resp.json().get("data", [])
             if fills:
@@ -221,10 +248,13 @@ class OnChainAnalyzer:
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        resp = request_with_retry(
-            f"{self.BITGET_BASE}/merge-depth",
-            params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "limit": "50"},
-        )
+        try:
+            resp = request_with_retry(
+                f"{self.BITGET_BASE}/merge-depth",
+                params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES", "limit": "50"},
+            )
+        except HttpClientError:
+            resp = None
         if resp:
             ob = resp.json().get("data", {})
             bids = ob.get("bids", [])

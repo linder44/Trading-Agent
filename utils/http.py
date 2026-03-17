@@ -10,6 +10,14 @@ import requests
 from loguru import logger
 
 
+class HttpClientError(Exception):
+    """Raised on 4xx HTTP errors (client errors that won't fix on retry)."""
+
+    def __init__(self, status_code: int, message: str = ""):
+        self.status_code = status_code
+        super().__init__(message)
+
+
 def request_with_retry(
     url: str,
     params: dict | None = None,
@@ -28,6 +36,10 @@ def request_with_retry(
 
     Returns:
         Response object on success, None on all retries exhausted.
+
+    Raises:
+        HttpClientError: on 4xx responses so callers can distinguish
+            "not supported" (400) from "network issue" (timeout/None).
     """
     last_error = None
     for attempt in range(1, retries + 1):
@@ -44,6 +56,9 @@ def request_with_retry(
             else:
                 logger.warning(f"All {retries} attempts failed for {url}: {e}")
         except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if 400 <= status < 500:
+                raise HttpClientError(status, str(e)) from e
             logger.warning(f"HTTP error for {url}: {e}")
             return None
         except Exception as e:
