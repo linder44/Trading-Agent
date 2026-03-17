@@ -6,46 +6,49 @@ often mark local tops/bottoms. Claude uses this to:
 - Gauge market stress level
 - Avoid entering during liquidation cascades
 
-Uses Binance Futures globalLongShortAccountRatio (public, no keys needed).
-Compares the two most recent 5m snapshots to detect sharp position changes.
+Uses Bybit v5 public API (account-ratio) — works globally, no keys needed.
+Compares the two most recent 5-min snapshots to detect sharp position changes.
 """
 
 from loguru import logger
 
 from utils.http import HttpClientError, request_with_retry
 
-BINANCE_FUTURES = "https://fapi.binance.com/futures/data"
+BYBIT_V5 = "https://api.bybit.com/v5/market"
 
 
 class LiquidationAnalyzer:
-    """Estimates liquidation pressure from Binance long/short position changes."""
+    """Estimates liquidation pressure from Bybit long/short position changes."""
 
     def get_liquidations(self, symbol: str) -> dict:
         """Get recent liquidation pressure for a symbol.
 
-        Fetches 2 most recent 5-minute snapshots of global long/short ratio
-        from Binance. A sharp drop in long% = long liquidations, and vice versa.
+        Fetches 2 most recent 5-minute snapshots of long/short account ratio
+        from Bybit. A sharp drop in long% = long liquidations, and vice versa.
         """
         base_coin = symbol.split("/")[0]
         try:
             resp = request_with_retry(
-                f"{BINANCE_FUTURES}/globalLongShortAccountRatio",
+                f"{BYBIT_V5}/account-ratio",
                 params={
+                    "category": "linear",
                     "symbol": f"{base_coin}USDT",
-                    "period": "5m",
+                    "period": "5min",
                     "limit": "2",
                 },
                 timeout=10,
             )
             if resp:
-                data = resp.json()
+                body = resp.json()
+                data = body.get("result", {}).get("list", [])
                 if data and isinstance(data, list) and len(data) >= 2:
-                    prev = data[0]
-                    latest = data[1]
-                    long_now = float(latest.get("longAccount", 0.5))
-                    long_prev = float(prev.get("longAccount", 0.5))
-                    short_now = float(latest.get("shortAccount", 0.5))
-                    short_prev = float(prev.get("shortAccount", 0.5))
+                    # Bybit returns newest first, so [0]=latest, [1]=prev
+                    latest = data[0]
+                    prev = data[1]
+                    long_now = float(latest.get("buyRatio", 0.5))
+                    long_prev = float(prev.get("buyRatio", 0.5))
+                    short_now = float(latest.get("sellRatio", 0.5))
+                    short_prev = float(prev.get("sellRatio", 0.5))
 
                     # Sharp drop in long positions = long liquidations
                     long_liq_pressure = max(0, (long_prev - long_now) * 100)

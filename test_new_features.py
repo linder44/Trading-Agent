@@ -149,17 +149,18 @@ class TestLiquidations(unittest.TestCase):
     def setUp(self):
         self.analyzer = LiquidationAnalyzer()
 
-    def _make_resp(self, json_data):
+    def _bybit_resp(self, items):
+        """Create mock Bybit v5 account-ratio response."""
         resp = MagicMock()
-        resp.json.return_value = json_data
+        resp.json.return_value = {"retCode": 0, "result": {"list": items}}
         return resp
 
     @patch("analysis.liquidations.request_with_retry")
     def test_normal_market(self, mock_req):
         """No significant position changes = low stress."""
-        mock_req.return_value = self._make_resp([
-            {"longAccount": "0.500", "shortAccount": "0.500"},
-            {"longAccount": "0.501", "shortAccount": "0.499"},
+        mock_req.return_value = self._bybit_resp([
+            {"buyRatio": "0.501", "sellRatio": "0.499"},
+            {"buyRatio": "0.500", "sellRatio": "0.500"},
         ])
 
         result = self.analyzer.get_liquidations("BTC/USDT:USDT")
@@ -169,9 +170,9 @@ class TestLiquidations(unittest.TestCase):
     @patch("analysis.liquidations.request_with_retry")
     def test_long_liquidation_cascade(self, mock_req):
         """Sharp drop in long positions = long liquidations."""
-        mock_req.return_value = self._make_resp([
-            {"longAccount": "0.60", "shortAccount": "0.40"},
-            {"longAccount": "0.45", "shortAccount": "0.55"},
+        mock_req.return_value = self._bybit_resp([
+            {"buyRatio": "0.45", "sellRatio": "0.55"},
+            {"buyRatio": "0.60", "sellRatio": "0.40"},
         ])
 
         result = self.analyzer.get_liquidations("BTC/USDT:USDT")
@@ -186,9 +187,9 @@ class TestLiquidations(unittest.TestCase):
 
     @patch("analysis.liquidations.request_with_retry")
     def test_get_all_liquidations(self, mock_req):
-        mock_req.return_value = self._make_resp([
-            {"longAccount": "0.50", "shortAccount": "0.50"},
-            {"longAccount": "0.50", "shortAccount": "0.50"},
+        mock_req.return_value = self._bybit_resp([
+            {"buyRatio": "0.50", "sellRatio": "0.50"},
+            {"buyRatio": "0.50", "sellRatio": "0.50"},
         ])
 
         result = self.analyzer.get_all_liquidations(["BTC/USDT:USDT", "ETH/USDT:USDT"])
@@ -196,16 +197,17 @@ class TestLiquidations(unittest.TestCase):
         self.assertIn("ETH/USDT:USDT", result)
 
     @patch("analysis.liquidations.request_with_retry")
-    def test_binance_url_used(self, mock_req):
-        """Verify Binance endpoint is called, not Bitget."""
-        mock_req.return_value = self._make_resp([
-            {"longAccount": "0.50", "shortAccount": "0.50"},
-            {"longAccount": "0.50", "shortAccount": "0.50"},
+    def test_bybit_url_used(self, mock_req):
+        """Verify Bybit endpoint is called, not Bitget or Binance."""
+        mock_req.return_value = self._bybit_resp([
+            {"buyRatio": "0.50", "sellRatio": "0.50"},
+            {"buyRatio": "0.50", "sellRatio": "0.50"},
         ])
         self.analyzer.get_liquidations("BTC/USDT:USDT")
         call_url = mock_req.call_args[0][0]
-        self.assertIn("fapi.binance.com", call_url)
+        self.assertIn("api.bybit.com", call_url)
         self.assertNotIn("bitget", call_url)
+        self.assertNotIn("binance", call_url)
 
     def test_result_has_required_fields(self):
         """Even on failure, result should have all expected keys."""

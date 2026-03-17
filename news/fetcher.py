@@ -1,10 +1,12 @@
 """News fetcher and sentiment analysis module.
 
 Sources (in priority order):
-1. CryptoPanic — free public API, no key needed for basic posts
-2. NewsAPI — paid key required (NEWS_API_KEY env var)
-3. CoinGecko — trending coins
-4. Alternative.me — Fear & Greed Index
+1. NewsData.io — free API key (200 req/day), global, crypto category
+   Get free key: https://newsdata.io/register
+2. CryptoPanic — free public API, no key needed
+3. NewsAPI — paid key required (NEWS_API_KEY env var)
+4. CoinGecko — trending coins
+5. Alternative.me — Fear & Greed Index
 """
 
 import time
@@ -22,20 +24,69 @@ class NewsFetcher:
 
     COINGECKO_TRENDING = "https://api.coingecko.com/api/v3/search/trending"
     CRYPTOPANIC_API = "https://cryptopanic.com/api/free/v1/posts/"
+    NEWSDATA_API = "https://newsdata.io/api/1/latest"
 
     def __init__(self, cfg: NewsConfig):
         self.cfg = cfg
         self._cache: dict = {}
         self._cache_ttl = 300  # 5 min cache
 
+    # ─── NewsData.io (free key, 200 req/day) ──────────────────────
+
+    def fetch_newsdata(self, query: str = "cryptocurrency OR bitcoin",
+                       category: str | None = None) -> list[dict]:
+        """Fetch news from NewsData.io (requires free NEWSDATA_API_KEY).
+
+        Free tier: 200 requests/day, works globally without geo-restrictions.
+        """
+        if not self.cfg.newsdata_api_key:
+            return []
+
+        cache_key = f"newsdata_{query}_{category}"
+        if self._is_cached(cache_key):
+            return self._cache[cache_key]["data"]
+
+        try:
+            params: dict = {
+                "apikey": self.cfg.newsdata_api_key,
+                "q": query,
+                "language": "en",
+            }
+            if category:
+                params["category"] = category
+
+            resp = request_with_retry(
+                self.NEWSDATA_API,
+                params=params,
+                timeout=10,
+            )
+            if not resp:
+                return []
+            data = resp.json()
+            articles = data.get("results", [])
+            result = [
+                {
+                    "title": a.get("title", ""),
+                    "source": a.get("source_name", a.get("source_id", "NewsData")),
+                    "url": a.get("link", ""),
+                    "published_at": a.get("pubDate", ""),
+                }
+                for a in articles
+                if a.get("title")
+            ]
+            self._set_cache(cache_key, result)
+            return result
+        except HttpClientError as e:
+            logger.warning(f"NewsData.io returned {e.status_code}: {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"NewsData.io fetch error: {e}")
+            return []
+
     # ─── CryptoPanic (free, no key needed) ────────────────────────
 
     def fetch_cryptopanic(self, kind: str = "news") -> list[dict]:
-        """Fetch posts from CryptoPanic free API.
-
-        Args:
-            kind: "news" for crypto news, "media" for broader coverage.
-        """
+        """Fetch posts from CryptoPanic free API."""
         cache_key = f"cryptopanic_{kind}"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
@@ -171,21 +222,22 @@ class NewsFetcher:
     def get_market_context(self) -> dict:
         """Get full market context for AI decision making.
 
-        News priority: CryptoPanic (free) → NewsAPI (paid, if key set).
+        News priority: NewsData.io (free key) → CryptoPanic (no key) → NewsAPI (paid).
         """
-        # 1. CryptoPanic — бесплатные крипто-новости (основной источник)
-        crypto_news = self.fetch_cryptopanic("news")
-
-        # 2. NewsAPI — платный fallback (если есть ключ и CryptoPanic не дал результат)
+        # 1. Крипто-новости: NewsData.io → CryptoPanic → NewsAPI
+        crypto_news = self.fetch_newsdata("cryptocurrency OR bitcoin OR ethereum OR crypto")
+        if not crypto_news:
+            crypto_news = self.fetch_cryptopanic("news")
         if not crypto_news and self.cfg.api_key:
-            crypto_keywords = [k for k in self.cfg.keywords if k in (
-                "bitcoin", "ethereum", "crypto", "altcoin",
-                "SEC", "Fed", "interest rate", "inflation", "CPI",
-            )]
-            crypto_news = self.fetch_newsapi(" OR ".join(crypto_keywords[:5]))
+            crypto_news = self.fetch_newsapi("bitcoin OR ethereum OR crypto")
 
-        # 3. Геополитика/макро — CryptoPanic media + NewsAPI fallback
-        geo_news = self.fetch_cryptopanic("media")
+        # 2. Геополитика/макро: NewsData.io → CryptoPanic media → NewsAPI
+        geo_news = self.fetch_newsdata(
+            "inflation OR interest rate OR sanctions OR tariffs OR recession",
+            category="business",
+        )
+        if not geo_news:
+            geo_news = self.fetch_cryptopanic("media")
         if not geo_news and self.cfg.api_key:
             geopolitics_keywords = [k for k in self.cfg.keywords if k not in (
                 "bitcoin", "ethereum", "crypto", "altcoin",

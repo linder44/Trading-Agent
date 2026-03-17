@@ -67,6 +67,7 @@ class NotificationConfig(BaseModel):
 
 class NewsConfig(BaseModel):
     api_key: str = os.getenv("NEWS_API_KEY", "")
+    newsdata_api_key: str = os.getenv("NEWSDATA_API_KEY", "")
     keywords: list[str] = [
         # Крипто
         "bitcoin", "ethereum", "crypto", "altcoin",

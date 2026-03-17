@@ -1,10 +1,11 @@
-"""Tests for onchain.py: Binance long/short ratio, funding timeout, HttpClientError.
+"""Tests for onchain.py: Bybit long/short ratio, funding timeout, HttpClientError.
 
 Covers:
-- Binance globalLongShortAccountRatio as primary source
-- ccxt fallback when Binance fails
+- Bybit v5 account-ratio as primary source for long/short ratio
+- ccxt fallback when Bybit fails
 - Default neutral when everything fails
 - Funding rate: 15s timeout, ccxt fallback, sentiments
+- Open interest: 15s timeout
 - HttpClientError: 4xx vs 5xx distinction in request_with_retry
 - Other onchain methods handle HttpClientError gracefully
 """
@@ -28,24 +29,34 @@ def _make_response(json_data):
     return resp
 
 
+def _bybit_ls_response(buy_ratio: str, sell_ratio: str, symbol: str = "BTCUSDT"):
+    """Create mock Bybit v5 account-ratio response."""
+    return _make_response({
+        "retCode": 0,
+        "result": {
+            "list": [
+                {"symbol": symbol, "buyRatio": buy_ratio,
+                 "sellRatio": sell_ratio, "timestamp": "1234567890000"}
+            ]
+        }
+    })
+
+
 # ═══════════════════════════════════════════════════════════════════
-# LONG/SHORT RATIO — BINANCE
+# LONG/SHORT RATIO — BYBIT
 # ═══════════════════════════════════════════════════════════════════
 
-class TestLongShortRatioBinance(unittest.TestCase):
-    """Binance globalLongShortAccountRatio as primary source."""
+class TestLongShortRatioBybit(unittest.TestCase):
+    """Bybit v5 account-ratio as primary source."""
 
     def setUp(self):
         self.analyzer = OnChainAnalyzer()
         self.mock_exchange = MagicMock()
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_success_btc(self, mock_req):
-        """BTC long/short ratio from Binance."""
-        mock_req.return_value = _make_response([
-            {"symbol": "BTCUSDT", "longAccount": "0.5162",
-             "shortAccount": "0.4838", "longShortRatio": "1.0670"}
-        ])
+    def test_bybit_success_btc(self, mock_req):
+        """BTC long/short ratio from Bybit."""
+        mock_req.return_value = _bybit_ls_response("0.5162", "0.4838")
 
         result = self.analyzer.get_long_short_ratio(self.mock_exchange, "BTC/USDT:USDT")
 
@@ -53,19 +64,16 @@ class TestLongShortRatioBinance(unittest.TestCase):
         self.assertEqual(result["short_pct"], 48.4)
         self.assertEqual(result["ratio"], 1.07)
         self.assertEqual(result["signal"], "neutral")
-        self.assertEqual(result["_source"], "binance")
-        # Verify Binance URL was called
+        self.assertEqual(result["_source"], "bybit")
+        # Verify Bybit URL was called
         call_url = mock_req.call_args[0][0]
-        self.assertIn("fapi.binance.com", call_url)
-        self.assertIn("globalLongShortAccountRatio", call_url)
+        self.assertIn("api.bybit.com", call_url)
+        self.assertIn("account-ratio", call_url)
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_success_bnb(self, mock_req):
-        """BNB works on Binance (previously failed on Bitget with 400)."""
-        mock_req.return_value = _make_response([
-            {"symbol": "BNBUSDT", "longAccount": "0.55",
-             "shortAccount": "0.45", "longShortRatio": "1.2222"}
-        ])
+    def test_bybit_success_bnb(self, mock_req):
+        """BNB works on Bybit (previously failed on Bitget with 400)."""
+        mock_req.return_value = _bybit_ls_response("0.55", "0.45", "BNBUSDT")
 
         result = self.analyzer.get_long_short_ratio(self.mock_exchange, "BNB/USDT:USDT")
 
@@ -74,12 +82,9 @@ class TestLongShortRatioBinance(unittest.TestCase):
         self.assertEqual(result["ratio"], 1.22)
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_success_doge(self, mock_req):
-        """DOGE works on Binance (previously failed on Bitget with 400)."""
-        mock_req.return_value = _make_response([
-            {"symbol": "DOGEUSDT", "longAccount": "0.60",
-             "shortAccount": "0.40", "longShortRatio": "1.5"}
-        ])
+    def test_bybit_success_doge(self, mock_req):
+        """DOGE works on Bybit."""
+        mock_req.return_value = _bybit_ls_response("0.60", "0.40", "DOGEUSDT")
 
         result = self.analyzer.get_long_short_ratio(self.mock_exchange, "DOGE/USDT:USDT")
 
@@ -87,28 +92,23 @@ class TestLongShortRatioBinance(unittest.TestCase):
         self.assertEqual(result["ratio"], 1.5)
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_uses_correct_params(self, mock_req):
-        """Verify correct Binance API params: symbol, period=1h, limit=1."""
-        mock_req.return_value = _make_response([
-            {"symbol": "ADAUSDT", "longAccount": "0.5",
-             "shortAccount": "0.5", "longShortRatio": "1.0"}
-        ])
+    def test_bybit_uses_correct_params(self, mock_req):
+        """Verify correct Bybit API params."""
+        mock_req.return_value = _bybit_ls_response("0.5", "0.5", "ADAUSDT")
 
         self.analyzer.get_long_short_ratio(self.mock_exchange, "ADA/USDT:USDT")
 
         _, kwargs = mock_req.call_args
         params = kwargs["params"]
+        self.assertEqual(params["category"], "linear")
         self.assertEqual(params["symbol"], "ADAUSDT")
         self.assertEqual(params["period"], "1h")
         self.assertEqual(params["limit"], "1")
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_uses_10s_timeout(self, mock_req):
-        """Binance request uses timeout=10."""
-        mock_req.return_value = _make_response([
-            {"symbol": "BTCUSDT", "longAccount": "0.5",
-             "shortAccount": "0.5", "longShortRatio": "1.0"}
-        ])
+    def test_bybit_uses_10s_timeout(self, mock_req):
+        """Bybit request uses timeout=10."""
+        mock_req.return_value = _bybit_ls_response("0.5", "0.5")
 
         self.analyzer.get_long_short_ratio(self.mock_exchange, "BTC/USDT:USDT")
 
@@ -116,24 +116,18 @@ class TestLongShortRatioBinance(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 10)
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_contrarian_bearish(self, mock_req):
+    def test_contrarian_bearish(self, mock_req):
         """High ratio → contrarian_bearish signal."""
-        mock_req.return_value = _make_response([
-            {"symbol": "BTCUSDT", "longAccount": "0.75",
-             "shortAccount": "0.25", "longShortRatio": "3.0"}
-        ])
+        mock_req.return_value = _bybit_ls_response("0.75", "0.25")
 
         result = self.analyzer.get_long_short_ratio(self.mock_exchange, "BTC/USDT:USDT")
 
         self.assertEqual(result["signal"], "contrarian_bearish")
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_contrarian_bullish(self, mock_req):
+    def test_contrarian_bullish(self, mock_req):
         """Low ratio → contrarian_bullish signal."""
-        mock_req.return_value = _make_response([
-            {"symbol": "BTCUSDT", "longAccount": "0.3",
-             "shortAccount": "0.7", "longShortRatio": "0.4286"}
-        ])
+        mock_req.return_value = _bybit_ls_response("0.3", "0.7")
 
         result = self.analyzer.get_long_short_ratio(self.mock_exchange, "BTC/USDT:USDT")
 
@@ -142,10 +136,7 @@ class TestLongShortRatioBinance(unittest.TestCase):
     @patch("analysis.onchain.request_with_retry")
     def test_cache_prevents_duplicate_calls(self, mock_req):
         """Second call uses cache — no extra API call."""
-        mock_req.return_value = _make_response([
-            {"symbol": "BTCUSDT", "longAccount": "0.6",
-             "shortAccount": "0.4", "longShortRatio": "1.5"}
-        ])
+        mock_req.return_value = _bybit_ls_response("0.6", "0.4")
 
         r1 = self.analyzer.get_long_short_ratio(self.mock_exchange, "BTC/USDT:USDT")
         r2 = self.analyzer.get_long_short_ratio(self.mock_exchange, "BTC/USDT:USDT")
@@ -154,9 +145,9 @@ class TestLongShortRatioBinance(unittest.TestCase):
         self.assertEqual(mock_req.call_count, 1)
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_empty_response_falls_to_ccxt(self, mock_req):
-        """Binance returns empty list → ccxt fallback."""
-        mock_req.return_value = _make_response([])
+    def test_bybit_empty_list_falls_to_ccxt(self, mock_req):
+        """Bybit returns empty list → ccxt fallback."""
+        mock_req.return_value = _make_response({"retCode": 0, "result": {"list": []}})
         self.mock_exchange.exchange.fetch_long_short_ratio_history.return_value = [
             {"longAccount": 0.55, "shortAccount": 0.45}
         ]
@@ -167,15 +158,15 @@ class TestLongShortRatioBinance(unittest.TestCase):
 
 
 class TestLongShortRatioFallback(unittest.TestCase):
-    """Fallback behavior when Binance is unavailable."""
+    """Fallback behavior when Bybit is unavailable."""
 
     def setUp(self):
         self.analyzer = OnChainAnalyzer()
         self.mock_exchange = MagicMock()
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_timeout_ccxt_fallback(self, mock_req):
-        """Binance times out (None) → ccxt fallback succeeds."""
+    def test_bybit_timeout_ccxt_fallback(self, mock_req):
+        """Bybit times out (None) → ccxt fallback succeeds."""
         mock_req.return_value = None
         self.mock_exchange.exchange.fetch_long_short_ratio_history.return_value = [
             {"longAccount": 0.65, "shortAccount": 0.35}
@@ -188,8 +179,8 @@ class TestLongShortRatioFallback(unittest.TestCase):
         self.assertEqual(result["_source"], "ccxt")
 
     @patch("analysis.onchain.request_with_retry")
-    def test_binance_400_ccxt_fallback(self, mock_req):
-        """Binance returns 400 → ccxt fallback."""
+    def test_bybit_400_ccxt_fallback(self, mock_req):
+        """Bybit returns 400 → ccxt fallback."""
         mock_req.side_effect = HttpClientError(400, "Bad Request")
         self.mock_exchange.exchange.fetch_long_short_ratio_history.return_value = [
             {"longAccount": 0.6, "shortAccount": 0.4}
@@ -198,12 +189,11 @@ class TestLongShortRatioFallback(unittest.TestCase):
         result = self.analyzer.get_long_short_ratio(self.mock_exchange, "PEPE/USDT:USDT")
 
         self.assertEqual(result["long_pct"], 60.0)
-        # Only 1 REST call (no period loop anymore)
         self.assertEqual(mock_req.call_count, 1)
 
     @patch("analysis.onchain.request_with_retry")
     def test_everything_fails_returns_neutral(self, mock_req):
-        """Both Binance and ccxt fail → neutral default."""
+        """Both Bybit and ccxt fail → neutral default."""
         mock_req.return_value = None
         self.mock_exchange.exchange.fetch_long_short_ratio_history.side_effect = Exception("nope")
 
@@ -212,57 +202,49 @@ class TestLongShortRatioFallback(unittest.TestCase):
         self.assertEqual(result, {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral", "_source": "default"})
 
     @patch("analysis.onchain.request_with_retry")
-    def test_no_bitget_calls(self, mock_req):
-        """Verify NO calls to Bitget account-long-short anymore."""
-        mock_req.return_value = _make_response([
-            {"symbol": "BTCUSDT", "longAccount": "0.5",
-             "shortAccount": "0.5", "longShortRatio": "1.0"}
-        ])
+    def test_no_bitget_or_binance_calls(self, mock_req):
+        """Verify NO calls to Bitget or Binance."""
+        mock_req.return_value = _bybit_ls_response("0.5", "0.5")
 
         self.analyzer.get_long_short_ratio(self.mock_exchange, "BTC/USDT:USDT")
 
         call_url = mock_req.call_args[0][0]
         self.assertNotIn("bitget", call_url)
-        self.assertNotIn("account-long-short", call_url)
+        self.assertNotIn("binance", call_url)
+        self.assertIn("bybit", call_url)
 
 
-class TestParseBinanceLs(unittest.TestCase):
-    """Unit tests for _parse_binance_ls helper."""
+class TestParseBybitLs(unittest.TestCase):
+    """Unit tests for _parse_bybit_ls helper."""
 
     def test_normal_data(self):
-        item = {"longAccount": "0.5162", "shortAccount": "0.4838", "longShortRatio": "1.0670"}
-        result = OnChainAnalyzer._parse_binance_ls(item)
+        item = {"buyRatio": "0.5162", "sellRatio": "0.4838", "timestamp": "123"}
+        result = OnChainAnalyzer._parse_bybit_ls(item)
         self.assertEqual(result["long_pct"], 51.6)
         self.assertEqual(result["short_pct"], 48.4)
         self.assertEqual(result["ratio"], 1.07)
         self.assertEqual(result["signal"], "neutral")
-        self.assertEqual(result["_source"], "binance")
+        self.assertEqual(result["_source"], "bybit")
 
     def test_extreme_long(self):
-        item = {"longAccount": "0.85", "shortAccount": "0.15", "longShortRatio": "5.6667"}
-        result = OnChainAnalyzer._parse_binance_ls(item)
+        item = {"buyRatio": "0.85", "sellRatio": "0.15"}
+        result = OnChainAnalyzer._parse_bybit_ls(item)
         self.assertEqual(result["signal"], "contrarian_bearish")
 
     def test_extreme_short(self):
-        item = {"longAccount": "0.2", "shortAccount": "0.8", "longShortRatio": "0.25"}
-        result = OnChainAnalyzer._parse_binance_ls(item)
+        item = {"buyRatio": "0.2", "sellRatio": "0.8"}
+        result = OnChainAnalyzer._parse_bybit_ls(item)
         self.assertEqual(result["signal"], "contrarian_bullish")
 
-    def test_missing_ratio_field_calculates(self):
-        """If longShortRatio is missing, calculate from accounts."""
-        item = {"longAccount": "0.6", "shortAccount": "0.4"}
-        result = OnChainAnalyzer._parse_binance_ls(item)
-        self.assertEqual(result["ratio"], 1.5)
-
     def test_equal_split(self):
-        item = {"longAccount": "0.5", "shortAccount": "0.5", "longShortRatio": "1.0"}
-        result = OnChainAnalyzer._parse_binance_ls(item)
+        item = {"buyRatio": "0.5", "sellRatio": "0.5"}
+        result = OnChainAnalyzer._parse_bybit_ls(item)
         self.assertEqual(result["ratio"], 1.0)
         self.assertEqual(result["signal"], "neutral")
 
 
 # ═══════════════════════════════════════════════════════════════════
-# FUNDING RATE
+# OPEN INTEREST TIMEOUT
 # ═══════════════════════════════════════════════════════════════════
 
 class TestOpenInterestTimeout(unittest.TestCase):
@@ -280,6 +262,10 @@ class TestOpenInterestTimeout(unittest.TestCase):
         _, kwargs = mock_req.call_args
         self.assertEqual(kwargs.get("timeout"), 15)
 
+
+# ═══════════════════════════════════════════════════════════════════
+# FUNDING RATE
+# ═══════════════════════════════════════════════════════════════════
 
 class TestFundingRate(unittest.TestCase):
 

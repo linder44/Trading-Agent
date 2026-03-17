@@ -23,7 +23,7 @@ class OnChainAnalyzer:
     """Fetches on-chain and derivatives market data."""
 
     BITGET_BASE = "https://api.bitget.com/api/v2/mix/market"
-    BINANCE_FUTURES = "https://fapi.binance.com/futures/data"
+    BYBIT_V5 = "https://api.bybit.com/v5/market"
 
     def __init__(self):
         self._cache: dict = {}
@@ -113,31 +113,36 @@ class OnChainAnalyzer:
     _LS_DEFAULT = {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral", "_source": "default"}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
-        """Get global long/short account ratio via Binance Futures public API.
+        """Get long/short account ratio via Bybit v5 public API.
 
-        Binance поддерживает все основные фьючерсные пары без ограничений,
-        в отличие от Bitget account-long-short (который 400 для многих символов).
-        Endpoint публичный, ключи не нужны.
+        Bybit работает глобально (без гео-блокировок как у Binance 451),
+        поддерживает все основные фьючерсные пары, ключи не нужны.
         """
         base_coin = symbol.split("/")[0]
         cache_key = f"ls_ratio_{base_coin}"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        # Binance Futures — основной источник
+        # Bybit v5 — основной источник
         try:
             resp = request_with_retry(
-                f"{self.BINANCE_FUTURES}/globalLongShortAccountRatio",
-                params={"symbol": f"{base_coin}USDT", "period": "1h", "limit": "1"},
+                f"{self.BYBIT_V5}/account-ratio",
+                params={
+                    "category": "linear",
+                    "symbol": f"{base_coin}USDT",
+                    "period": "1h",
+                    "limit": "1",
+                },
                 timeout=10,
             )
         except HttpClientError as e:
-            logger.debug(f"Binance long/short ratio 4xx for {base_coin}: {e}")
+            logger.debug(f"Bybit long/short ratio 4xx for {base_coin}: {e}")
             resp = None
         if resp:
-            api_data = resp.json()
-            if api_data and isinstance(api_data, list):
-                result = self._parse_binance_ls(api_data[-1])
+            body = resp.json()
+            items = body.get("result", {}).get("list", [])
+            if items:
+                result = self._parse_bybit_ls(items[0])
                 self._set_cache(cache_key, result)
                 return result
 
@@ -163,17 +168,15 @@ class OnChainAnalyzer:
         return self._LS_DEFAULT.copy()
 
     @staticmethod
-    def _parse_binance_ls(item: dict) -> dict:
-        """Parse Binance globalLongShortAccountRatio response item.
+    def _parse_bybit_ls(item: dict) -> dict:
+        """Parse Bybit v5 account-ratio response item.
 
-        Binance returns: {"symbol":"BTCUSDT","longAccount":"0.5162",
-                          "shortAccount":"0.4838","longShortRatio":"1.0670",...}
+        Bybit returns: {"symbol":"BTCUSDT","buyRatio":"0.5162",
+                        "sellRatio":"0.4838","timestamp":"1234567890000"}
         """
-        long_ratio = float(item.get("longAccount", 0.5))
-        short_ratio = float(item.get("shortAccount", 0.5))
-        ratio = float(item.get("longShortRatio", 0)) or (
-            long_ratio / short_ratio if short_ratio > 0 else 1.0
-        )
+        long_ratio = float(item.get("buyRatio", 0.5))
+        short_ratio = float(item.get("sellRatio", 0.5))
+        ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
         return {
             "long_pct": round(long_ratio * 100, 1),
             "short_pct": round(short_ratio * 100, 1),
@@ -181,7 +184,7 @@ class OnChainAnalyzer:
             "signal": "contrarian_bearish" if ratio > 2.0 else (
                 "contrarian_bullish" if ratio < 0.5 else "neutral"
             ),
-            "_source": "binance",
+            "_source": "bybit",
         }
 
     @staticmethod

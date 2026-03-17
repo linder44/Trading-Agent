@@ -80,44 +80,65 @@ def test_fear_greed():
     return True
 
 
-def test_binance_long_short():
-    """Test Binance Futures globalLongShortAccountRatio (public, no keys)."""
+def test_bybit_long_short():
+    """Test Bybit v5 account-ratio (public, no keys, works globally)."""
     resp = request_with_retry(
-        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
-        params={"symbol": "BTCUSDT", "period": "1h", "limit": "1"},
+        "https://api.bybit.com/v5/market/account-ratio",
+        params={"category": "linear", "symbol": "BTCUSDT", "period": "1h", "limit": "1"},
         timeout=10,
     )
     if not resp:
         return False
     data = resp.json()
-    if data and isinstance(data, list):
-        latest = data[-1]
-        long_r = float(latest.get("longAccount", 0))
-        short_r = float(latest.get("shortAccount", 0))
+    items = data.get("result", {}).get("list", [])
+    if items:
+        long_r = float(items[0].get("buyRatio", 0))
+        short_r = float(items[0].get("sellRatio", 0))
         logger.info(f"  BTC Long/Short: {long_r*100:.1f}% / {short_r*100:.1f}%")
         return True
-    logger.warning("  Empty data from Binance")
+    logger.warning("  Empty data from Bybit")
     return False
 
 
-def test_binance_liquidation_proxy():
-    """Test Binance long/short ratio for liquidation pressure (5m snapshots)."""
+def test_bybit_liquidation_proxy():
+    """Test Bybit long/short ratio for liquidation pressure (5m snapshots)."""
     resp = request_with_retry(
-        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
-        params={"symbol": "BTCUSDT", "period": "5m", "limit": "2"},
+        "https://api.bybit.com/v5/market/account-ratio",
+        params={"category": "linear", "symbol": "BTCUSDT", "period": "5min", "limit": "2"},
         timeout=10,
     )
     if not resp:
         return False
     data = resp.json()
-    if data and isinstance(data, list) and len(data) >= 2:
-        prev_long = float(data[0].get("longAccount", 0.5))
-        curr_long = float(data[1].get("longAccount", 0.5))
+    items = data.get("result", {}).get("list", [])
+    if items and len(items) >= 2:
+        prev_long = float(items[1].get("buyRatio", 0.5))
+        curr_long = float(items[0].get("buyRatio", 0.5))
         change = abs(prev_long - curr_long) * 100
         logger.info(f"  BTC position change (5m): {change:.2f}pp")
         return True
-    logger.warning("  Not enough data from Binance")
+    logger.warning("  Not enough data from Bybit")
     return False
+
+
+def test_newsdata():
+    """Test NewsData.io (requires free NEWSDATA_API_KEY in .env)."""
+    key = os.getenv("NEWSDATA_API_KEY", "")
+    if not key:
+        logger.warning("  SKIP: NEWSDATA_API_KEY not set. Get free key at https://newsdata.io/register")
+        return None
+    resp = request_with_retry(
+        "https://newsdata.io/api/1/latest",
+        params={"apikey": key, "q": "cryptocurrency OR bitcoin", "language": "en"},
+        timeout=10,
+    )
+    if not resp:
+        return False
+    articles = resp.json().get("results", [])
+    logger.info(f"  Got {len(articles)} articles")
+    if articles:
+        logger.info(f"  Latest: {articles[0].get('title', '')[:80]}")
+    return len(articles) > 0
 
 
 def test_bitget_funding():
@@ -294,8 +315,8 @@ def main():
             ("Fear & Greed Index", test_fear_greed),
         ],
         "onchain": [
-            ("Binance Long/Short Ratio", test_binance_long_short),
-            ("Binance Liquidation Proxy (5m)", test_binance_liquidation_proxy),
+            ("Bybit Long/Short Ratio", test_bybit_long_short),
+            ("Bybit Liquidation Proxy (5m)", test_bybit_liquidation_proxy),
             ("Bitget Funding Rate (REST)", test_bitget_funding),
             ("Bitget Open Interest (REST)", test_bitget_open_interest),
             ("Bitget Order Book (REST)", test_bitget_orderbook),
@@ -306,6 +327,7 @@ def main():
             ("CoinGecko Categories (sectors)", test_coingecko_categories),
         ],
         "news": [
+            ("NewsData.io (free key)", test_newsdata),
             ("CryptoPanic (free)", test_cryptopanic),
             ("NewsAPI (optional)", test_newsapi),
         ],
