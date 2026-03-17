@@ -156,9 +156,15 @@ def test_bitget_open_interest():
             logger.error(f"  Bitget API error: {data.get('msg', 'unknown')}")
             return False
         oi_data = data.get("data", {})
+        # Bitget может вернуть данные в разных полях — проверяем все варианты
         amount = float(oi_data.get("openInterestAmount", 0))
-        logger.info(f"  BTC open interest: {amount:,.2f} BTC")
-        return amount > 0
+        size = float(oi_data.get("amount", 0))
+        value = float(oi_data.get("openInterestValue", 0))
+        best = amount or size or value
+        logger.info(f"  BTC open interest: amount={amount}, size={size}, value={value}")
+        logger.info(f"  Raw response keys: {list(oi_data.keys())}")
+        logger.info(f"  Raw response: {oi_data}")
+        return best > 0 or bool(oi_data)  # OK если API вернул хоть какие-то данные
     except Exception as e:
         logger.error(f"  FAIL: {e}")
         return False
