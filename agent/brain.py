@@ -354,6 +354,17 @@ class TradingBrain:
         prompt_tokens_est = prompt_chars // 3  # ~3 chars per token for JSON-heavy text
         logger.info(f"Размер промпта: ~{prompt_chars:,} символов (~{prompt_tokens_est:,} токенов)")
 
+        # Выводим полный текст промпта в консоль для отладки
+        logger.info("=" * 80)
+        logger.info("ТЕКСТ ПРОМПТА, ОТПРАВЛЯЕМЫЙ В CLAUDE:")
+        logger.info("=" * 80)
+        logger.info(f"[SYSTEM PROMPT] ({len(SYSTEM_PROMPT)} символов)")
+        logger.info(SYSTEM_PROMPT)
+        logger.info("-" * 80)
+        logger.info(f"[USER MESSAGE] ({len(user_message)} символов)")
+        logger.info(user_message)
+        logger.info("=" * 80)
+
         try:
             response = self.client.messages.create(
                 model=self.model,
