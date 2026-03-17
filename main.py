@@ -389,7 +389,7 @@ class TradingAgent:
         # Save paper trades to file
         self._save_paper_log()
 
-        msg = f"[БУМАГА] *{action.upper()}* {symbol}\nЦена: {price}\nУверенность: {confidence}\nПричина: {reason}"
+        msg = self._format_paper_message(action, symbol, price, confidence, reason)
         self.notifier.send(msg)
 
     def _execute_live(self, decision: dict, balance: float):
@@ -449,13 +449,159 @@ class TradingAgent:
                 logger.info(f"Удержание {symbol}: {reason}")
 
             if result:
-                msg = f"*{action.upper()}* {symbol}\nУверенность: {confidence}\nПричина: {reason}\nДетали: {result}"
+                msg = self._format_trade_message(action, symbol, confidence, reason, result)
                 self.notifier.send(msg)
                 logger.info(f"Исполнено: {result}")
+            elif action != "hold":
+                # Notify about skipped/failed orders so user knows
+                msg = self._format_skipped_message(action, symbol, confidence, reason)
+                self.notifier.send(msg)
 
         except Exception as e:
             logger.error(f"Ошибка исполнения {action} для {symbol}: {e}")
-            self.notifier.send(f"ОШИБКА исполнения {action} {symbol}: {e}")
+            msg = self._format_error_message(action, symbol, e)
+            self.notifier.send(msg)
+
+    # ── Telegram message formatting ──────────────────────────────
+
+    @staticmethod
+    def _action_emoji(action: str) -> str:
+        emojis = {
+            "open_long": "\U0001F7E2",     # 🟢
+            "open_short": "\U0001F534",     # 🔴
+            "close": "\U0001F512",          # 🔒
+            "close_position": "\U0001F512", # 🔒
+            "update_sl": "\U0001F6E1",      # 🛡
+            "trigger_long": "\u23F3",       # ⏳
+            "trigger_short": "\u23F3",      # ⏳
+            "hold": "\u23F8",               # ⏸
+        }
+        return emojis.get(action, "\U0001F4CA")  # 📊
+
+    @staticmethod
+    def _action_label(action: str) -> str:
+        labels = {
+            "open_long": "ЛОНГ ОТКРЫТ",
+            "open_short": "ШОРТ ОТКРЫТ",
+            "close": "ПОЗИЦИЯ ЗАКРЫТА",
+            "close_position": "ПОЗИЦИЯ ЗАКРЫТА",
+            "update_sl": "СТОП-ЛОСС ОБНОВЛЁН",
+            "trigger_long": "ТРИГГЕР ЛОНГ",
+            "trigger_short": "ТРИГГЕР ШОРТ",
+            "hold": "УДЕРЖАНИЕ",
+        }
+        return labels.get(action, action.upper())
+
+    @staticmethod
+    def _confidence_bar(confidence: float) -> str:
+        filled = round(confidence * 10)
+        return "\u2588" * filled + "\u2591" * (10 - filled)
+
+    def _format_trade_message(self, action: str, symbol: str, confidence: float,
+                              reason: str, result: dict) -> str:
+        emoji = self._action_emoji(action)
+        label = self._action_label(action)
+        bar = self._confidence_bar(confidence)
+        coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
+
+        lines = [
+            f"{emoji} <b>{label}</b>  {coin}",
+            "",
+        ]
+
+        # Order details
+        if action in ("open_long", "open_short"):
+            entry = result.get("entry_price", "—")
+            sl = result.get("stop_loss", "—")
+            tp = result.get("take_profit", "—")
+            amt = result.get("amount", "—")
+            lines += [
+                f"\U0001F4B0 Цена входа:  <code>{entry}</code>",
+                f"\U0001F4E6 Объём:  <code>{amt}</code>",
+                f"\U0001F6D1 Стоп-лосс:  <code>{sl}</code>",
+                f"\U0001F3AF Тейк-профит:  <code>{tp}</code>",
+            ]
+        elif action in ("close", "close_position"):
+            exit_p = result.get("exit_price", "—")
+            pnl = result.get("pnl")
+            side = result.get("side", "")
+            pnl_emoji = "\U0001F4B5" if pnl and pnl >= 0 else "\U0001F4B8"
+            pnl_str = f"{pnl:+.2f} USDT" if pnl is not None else "—"
+            lines += [
+                f"\U0001F4C8 Сторона:  {side}",
+                f"\U0001F4B0 Цена выхода:  <code>{exit_p}</code>",
+                f"{pnl_emoji} PnL:  <b>{pnl_str}</b>",
+            ]
+        elif action == "update_sl":
+            new_sl = result.get("new_stop_loss", "—")
+            lines.append(f"\U0001F6E1 Новый SL:  <code>{new_sl}</code>")
+        elif action in ("trigger_long", "trigger_short"):
+            tp = result.get("trigger_price", "—")
+            amt = result.get("amount", "—")
+            lines += [
+                f"\u23F3 Триггер цена:  <code>{tp}</code>",
+                f"\U0001F4E6 Объём:  <code>{amt}</code>",
+            ]
+
+        lines += [
+            "",
+            f"\U0001F4CA Уверенность:  {confidence:.0%}  <code>{bar}</code>",
+            f"\U0001F4AC {reason}",
+            "",
+            "\u2500" * 20,
+        ]
+        return "\n".join(lines)
+
+    def _format_paper_message(self, action: str, symbol: str, price: float,
+                              confidence: float, reason: str) -> str:
+        emoji = self._action_emoji(action)
+        label = self._action_label(action)
+        bar = self._confidence_bar(confidence)
+        coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
+
+        lines = [
+            f"\U0001F4DD <b>[БУМАГА]</b>  {emoji} <b>{label}</b>  {coin}",
+            "",
+            f"\U0001F4B0 Цена:  <code>{price}</code>",
+            f"\U0001F4CA Уверенность:  {confidence:.0%}  <code>{bar}</code>",
+            f"\U0001F4AC {reason}",
+            "",
+            "\u2500" * 20,
+        ]
+        return "\n".join(lines)
+
+    def _format_skipped_message(self, action: str, symbol: str,
+                                confidence: float, reason: str) -> str:
+        coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
+        lines = [
+            f"\u26A0\uFE0F <b>ОРДЕР НЕ ИСПОЛНЕН</b>  {coin}",
+            "",
+            f"\U0001F3AF Действие:  {self._action_label(action)}",
+            f"\U0001F4CA Уверенность:  {confidence:.0%}",
+            f"\U0001F4AC {reason}",
+            "",
+            "<i>Причина: не прошёл проверку риска или расчёт позиции</i>",
+            "",
+            "\u2500" * 20,
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_error_message(action: str, symbol: str, error: Exception) -> str:
+        coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "") if symbol else "?"
+        lines = [
+            f"\u274C <b>ОШИБКА ИСПОЛНЕНИЯ</b>",
+            "",
+            f"\U0001F4C8 {action}  {coin}",
+            f"\U0001F6A8 <code>{error}</code>",
+            "",
+            "\u2500" * 20,
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_status_message(text: str) -> str:
+        return f"\U0001F916 <b>{text}</b>"
 
     def _get_atr(self, symbol: str) -> float | None:
         """Get latest ATR value for a symbol."""
@@ -480,7 +626,12 @@ class TradingAgent:
 
     def run(self, once: bool = False):
         """Main loop."""
-        self.notifier.send(f"Торговый агент ЗАПУЩЕН (режим {self.mode.upper()})")
+        self.notifier.send(
+            f"\U0001F680 <b>Торговый агент ЗАПУЩЕН</b>\n\n"
+            f"\U0001F3AE Режим: <b>{self.mode.upper()}</b>\n"
+            f"\U0001F4CA Символы: {', '.join(self.symbols)}\n"
+            f"\u23F1 Интервал: {config.trading.analysis_interval_minutes} мин"
+        )
 
         if once:
             self.run_cycle()
@@ -492,11 +643,17 @@ class TradingAgent:
                 self.run_cycle()
             except KeyboardInterrupt:
                 logger.info("Плавное завершение работы...")
-                self.notifier.send(f"Торговый агент ОСТАНОВЛЕН (режим {self.mode.upper()})")
+                self.notifier.send(
+                    f"\U0001F6D1 <b>Торговый агент ОСТАНОВЛЕН</b>\n\n"
+                    f"\U0001F3AE Режим: {self.mode.upper()}"
+                )
                 break
             except Exception as e:
                 logger.error(f"Ошибка цикла: {e}")
-                self.notifier.send(f"ОШИБКА цикла: {e}")
+                self.notifier.send(
+                    f"\u274C <b>ОШИБКА ЦИКЛА</b>\n\n"
+                    f"\U0001F6A8 <code>{e}</code>"
+                )
 
             wait_seconds = config.trading.analysis_interval_minutes * 60
             logger.info(f"Следующий цикл через {config.trading.analysis_interval_minutes} мин...")
