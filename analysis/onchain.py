@@ -1,11 +1,11 @@
 """On-chain and derivatives data module.
 
 Fetches data that is not available from standard OHLCV:
-- Funding rates (sentiment of futures traders)
+- Funding rates (Bitget REST API, ccxt fallback)
 - Open interest (how much money is in the market)
 - Long/short ratio (positioning of accounts)
-- Whale alerts (large transactions via Blockchain.com)
-- Exchange inflows/outflows (selling/buying pressure)
+- Whale detection (large trades on Bitget futures)
+- Exchange inflows/outflows (order book imbalance)
 """
 
 import time
@@ -23,15 +23,50 @@ class OnChainAnalyzer:
         self._cache_ttl = 300  # 5 min
 
     def get_funding_rate(self, exchange_client, symbol: str) -> dict:
-        """Get current funding rate from exchange.
+        """Get current funding rate using Bitget REST API directly.
 
         Positive = longs pay shorts (market is long-heavy, potential top)
         Negative = shorts pay longs (market is short-heavy, potential bottom)
         """
+        base_coin = symbol.split("/")[0]
+        cache_key = f"funding_{base_coin}"
+        if self._is_cached(cache_key):
+            return self._cache[cache_key]["data"]
+
+        # Bitget public REST API — не требует load_markets()
+        try:
+            resp = requests.get(
+                "https://api.bitget.com/api/v2/mix/market/current-fund-rate",
+                params={
+                    "symbol": f"{base_coin}USDT",
+                    "productType": "USDT-FUTURES",
+                },
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                api_data = resp.json().get("data", [])
+                if api_data:
+                    item = api_data[0] if isinstance(api_data, list) else api_data
+                    rate = float(item.get("fundingRate", 0))
+                    result = {
+                        "funding_rate": round(rate, 6),
+                        "funding_rate_pct": round(rate * 100, 4),
+                        "sentiment": "extreme_greed" if rate > 0.001 else (
+                            "bullish" if rate > 0 else (
+                                "extreme_fear" if rate < -0.001 else "bearish"
+                            )
+                        ),
+                    }
+                    self._set_cache(cache_key, result)
+                    return result
+        except Exception as e:
+            logger.warning(f"Funding rate REST failed for {base_coin}: {e}")
+
+        # Fallback: ccxt (если REST недоступен)
         try:
             funding = exchange_client.exchange.fetch_funding_rate(symbol)
             rate = float(funding.get("fundingRate", 0))
-            return {
+            result = {
                 "funding_rate": round(rate, 6),
                 "funding_rate_pct": round(rate * 100, 4),
                 "sentiment": "extreme_greed" if rate > 0.001 else (
@@ -40,9 +75,12 @@ class OnChainAnalyzer:
                     )
                 ),
             }
+            self._set_cache(cache_key, result)
+            return result
         except Exception as e:
-            logger.warning(f"Funding rate fetch failed for {symbol}: {e}")
-            return {"funding_rate": 0, "funding_rate_pct": 0, "sentiment": "unknown"}
+            logger.warning(f"Funding rate ccxt fallback failed for {symbol}: {e}")
+
+        return {"funding_rate": 0, "funding_rate_pct": 0, "sentiment": "unknown"}
 
     def get_open_interest(self, exchange_client, symbol: str) -> dict:
         """Get open interest data.
@@ -110,48 +148,81 @@ class OnChainAnalyzer:
 
         return {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 
-    def get_whale_alerts(self) -> list[dict]:
-        """Detect large BTC transactions via Blockchain.com (free, no API key).
+    def get_whale_alerts(self, exchange_client=None) -> list[dict]:
+        """Detect large trades on Bitget (whale activity proxy).
 
-        Looks at recent unconfirmed transactions > threshold.
+        Uses Bitget recent fills API to find abnormally large trades.
+        More reliable than blockchain.info which often times out.
         """
         cache_key = "whale_alerts"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
+        large_trades = []
+
+        # Метод 1: Bitget REST API — последние сделки на BTC фьючерсах
         try:
-            # Blockchain.com — free, no auth, gives recent large unconfirmed txs
             resp = requests.get(
-                "https://blockchain.info/unconfirmed-transactions?format=json",
+                "https://api.bitget.com/api/v2/mix/market/fills",
+                params={
+                    "symbol": "BTCUSDT",
+                    "productType": "USDT-FUTURES",
+                    "limit": "100",
+                },
                 timeout=8,
             )
             if resp.status_code == 200:
-                txs = resp.json().get("txs", [])
-                large_txs = []
-                for tx in txs:
-                    # Calculate total output value in BTC
-                    total_btc = sum(o.get("value", 0) for o in tx.get("out", [])) / 1e8
-                    if total_btc >= 10:  # 10+ BTC transactions
-                        has_exchange_input = any(
-                            inp.get("prev_out", {}).get("addr", "").startswith("bc1q")
-                            or inp.get("prev_out", {}).get("addr", "").startswith("3")
-                            for inp in tx.get("inputs", [])
-                        )
-                        large_txs.append({
-                            "symbol": "BTC",
-                            "amount_btc": round(total_btc, 2),
-                            "num_outputs": len(tx.get("out", [])),
-                            "type": "large_transfer",
-                        })
-                    if len(large_txs) >= 10:
-                        break
+                fills = resp.json().get("data", [])
+                if fills:
+                    # Считаем средний объём, ищем аномально крупные
+                    sizes = [float(f.get("size", 0)) for f in fills if float(f.get("size", 0)) > 0]
+                    if sizes:
+                        avg_size = sum(sizes) / len(sizes)
+                        threshold = avg_size * 5  # 5x среднего = "кит"
 
-                self._set_cache(cache_key, large_txs)
-                return large_txs
+                        for f in fills:
+                            size = float(f.get("size", 0))
+                            if size >= threshold:
+                                large_trades.append({
+                                    "symbol": "BTC",
+                                    "size_contracts": size,
+                                    "side": f.get("side", "unknown"),
+                                    "price": float(f.get("price", 0)),
+                                    "ratio_to_avg": round(size / avg_size, 1),
+                                    "type": "whale_trade",
+                                })
+                            if len(large_trades) >= 10:
+                                break
+
+                        self._set_cache(cache_key, large_trades)
+                        return large_trades
         except Exception as e:
-            logger.warning(f"Whale alert fetch failed: {e}")
+            logger.warning(f"Whale detection (Bitget fills) failed: {e}")
 
-        return []
+        # Метод 2: order book — крупные заявки как прокси
+        if exchange_client:
+            try:
+                ob = exchange_client.exchange.fetch_order_book("BTC/USDT:USDT", limit=50)
+                all_orders = [(b[0], b[1], "bid") for b in ob.get("bids", [])] + \
+                             [(a[0], a[1], "ask") for a in ob.get("asks", [])]
+                if all_orders:
+                    avg_vol = sum(o[1] for o in all_orders) / len(all_orders)
+                    for price, vol, side in all_orders:
+                        if vol >= avg_vol * 5:
+                            large_trades.append({
+                                "symbol": "BTC",
+                                "size_btc": round(vol, 4),
+                                "price": price,
+                                "side": side,
+                                "type": "whale_order",
+                            })
+                        if len(large_trades) >= 10:
+                            break
+            except Exception as e:
+                logger.warning(f"Whale detection (order book) failed: {e}")
+
+        self._set_cache(cache_key, large_trades)
+        return large_trades
 
     def get_exchange_netflow(self, exchange_client) -> dict:
         """Estimate exchange flow direction from order book imbalance.
@@ -197,7 +268,7 @@ class OnChainAnalyzer:
             }
 
         result["_market_wide"] = {
-            "whale_alerts": self.get_whale_alerts(),
+            "whale_alerts": self.get_whale_alerts(exchange_client),
             "exchange_netflow": self.get_exchange_netflow(exchange_client),
         }
 

@@ -117,18 +117,26 @@ def test_bitget_long_short():
 
 
 def test_bitget_funding():
-    """Test Bitget funding rate via ccxt (if available)."""
+    """Test Bitget funding rate via REST API (no ccxt load_markets needed)."""
     try:
-        import ccxt
-        exchange = ccxt.bitget({"enableRateLimit": True, "options": {"defaultType": "swap"}})
-        exchange.load_markets()
-        funding = exchange.fetch_funding_rate("BTC/USDT:USDT")
-        rate = float(funding.get("fundingRate", 0))
-        logger.info(f"  BTC funding rate: {rate*100:.4f}%")
-        return True
-    except ImportError:
-        logger.warning("  SKIP: ccxt not installed (pip install ccxt)")
-        return None
+        resp = requests.get(
+            "https://api.bitget.com/api/v2/mix/market/current-fund-rate",
+            params={"symbol": "BTCUSDT", "productType": "USDT-FUTURES"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != "00000":
+            logger.error(f"  Bitget API error: {data.get('msg', 'unknown')}")
+            return False
+        items = data.get("data", [])
+        if items:
+            item = items[0] if isinstance(items, list) else items
+            rate = float(item.get("fundingRate", 0))
+            logger.info(f"  BTC funding rate: {rate*100:.4f}%")
+            return True
+        logger.warning("  Empty data from Bitget funding rate API")
+        return False
     except Exception as e:
         logger.error(f"  FAIL: {e}")
         return False
@@ -152,22 +160,33 @@ def test_bitget_open_interest():
         return False
 
 
-def test_blockchain_whale():
-    """Test Blockchain.com unconfirmed transactions (whale proxy)."""
+def test_bitget_whale_trades():
+    """Test Bitget recent fills for whale detection (large trades)."""
     try:
         resp = requests.get(
-            "https://blockchain.info/unconfirmed-transactions?format=json",
+            "https://api.bitget.com/api/v2/mix/market/fills",
+            params={
+                "symbol": "BTCUSDT",
+                "productType": "USDT-FUTURES",
+                "limit": "100",
+            },
             timeout=8,
         )
         resp.raise_for_status()
-        txs = resp.json().get("txs", [])
-        large = 0
-        for tx in txs:
-            total_btc = sum(o.get("value", 0) for o in tx.get("out", [])) / 1e8
-            if total_btc >= 10:
-                large += 1
-        logger.info(f"  Found {large} transactions >= 10 BTC in mempool ({len(txs)} total)")
-        return True
+        data = resp.json()
+        if data.get("code") != "00000":
+            logger.error(f"  Bitget API error: {data.get('msg', 'unknown')}")
+            return False
+        fills = data.get("data", [])
+        if fills:
+            sizes = [float(f.get("size", 0)) for f in fills if float(f.get("size", 0)) > 0]
+            if sizes:
+                avg_size = sum(sizes) / len(sizes)
+                whales = sum(1 for s in sizes if s >= avg_size * 5)
+                logger.info(f"  {len(fills)} recent trades, avg size={avg_size:.2f}, whale trades (>5x avg)={whales}")
+                return True
+        logger.warning("  Empty data from Bitget fills API")
+        return False
     except Exception as e:
         logger.error(f"  FAIL: {e}")
         return False
@@ -269,10 +288,10 @@ def main():
         ],
         "onchain": [
             ("Bitget Long/Short Ratio (REST)", test_bitget_long_short),
-            ("Bitget Funding Rate (ccxt)", test_bitget_funding),
+            ("Bitget Funding Rate (REST)", test_bitget_funding),
             ("Bitget Open Interest (ccxt)", test_bitget_open_interest),
             ("Bitget Order Book (netflow proxy)", test_bitget_orderbook),
-            ("Blockchain.com Whales", test_blockchain_whale),
+            ("Bitget Whale Trades (REST)", test_bitget_whale_trades),
         ],
         "social": [
             ("CoinGecko Trending", test_coingecko_trending),
