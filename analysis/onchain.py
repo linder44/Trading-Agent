@@ -23,11 +23,11 @@ class OnChainAnalyzer:
     """Fetches on-chain and derivatives market data."""
 
     BITGET_BASE = "https://api.bitget.com/api/v2/mix/market"
+    BINANCE_FUTURES = "https://fapi.binance.com/futures/data"
 
     def __init__(self):
         self._cache: dict = {}
         self._cache_ttl = 300  # 5 min
-        self._unsupported_ls_symbols: set[str] = set()  # symbols that 400 on account-long-short
 
     def get_funding_rate(self, exchange_client, symbol: str) -> dict:
         """Get current funding rate using Bitget REST API directly."""
@@ -109,40 +109,38 @@ class OnChainAnalyzer:
 
         return {"open_interest_value_usd": 0, "open_interest_amount": 0}
 
-    _LS_PERIODS = ("5m", "15m", "1h")
     _LS_DEFAULT = {"long_pct": 50, "short_pct": 50, "ratio": 1.0, "signal": "neutral"}
 
     def get_long_short_ratio(self, exchange_client, symbol: str) -> dict:
-        """Get long/short ratio using Bitget public API directly."""
+        """Get global long/short account ratio via Binance Futures public API.
+
+        Binance поддерживает все основные фьючерсные пары без ограничений,
+        в отличие от Bitget account-long-short (который 400 для многих символов).
+        Endpoint публичный, ключи не нужны.
+        """
         base_coin = symbol.split("/")[0]
         cache_key = f"ls_ratio_{base_coin}"
         if self._is_cached(cache_key):
             return self._cache[cache_key]["data"]
 
-        # Символ уже помечен как неподдерживаемый — сразу в ccxt fallback
-        if base_coin not in self._unsupported_ls_symbols:
-            for period in self._LS_PERIODS:
-                try:
-                    resp = request_with_retry(
-                        f"{self.BITGET_BASE}/account-long-short",
-                        params={"symbol": f"{base_coin}USDT", "period": period,
-                                "productType": "USDT-FUTURES"},
-                        retries=1,
-                    )
-                except HttpClientError:
-                    # 400 = символ не поддерживается Bitget для long/short,
-                    # остальные периоды тоже не помогут — выходим из цикла
-                    logger.debug(f"Long/short ratio not supported for {base_coin} on Bitget")
-                    self._unsupported_ls_symbols.add(base_coin)
-                    break
-                if resp:
-                    api_data = resp.json().get("data", [])
-                    if api_data:
-                        result = self._parse_ls_ratio(api_data)
-                        self._set_cache(cache_key, result)
-                        return result
+        # Binance Futures — основной источник
+        try:
+            resp = request_with_retry(
+                f"{self.BINANCE_FUTURES}/globalLongShortAccountRatio",
+                params={"symbol": f"{base_coin}USDT", "period": "1h", "limit": "1"},
+                timeout=10,
+            )
+        except HttpClientError as e:
+            logger.debug(f"Binance long/short ratio 4xx for {base_coin}: {e}")
+            resp = None
+        if resp:
+            api_data = resp.json()
+            if api_data and isinstance(api_data, list):
+                result = self._parse_binance_ls(api_data[-1])
+                self._set_cache(cache_key, result)
+                return result
 
-        # Fallback: ccxt
+        # Fallback: ccxt (через биржу пользователя)
         try:
             ls = exchange_client.exchange.fetch_long_short_ratio_history(symbol, limit=1)
             if ls:
@@ -162,16 +160,25 @@ class OnChainAnalyzer:
 
         return self._LS_DEFAULT.copy()
 
-    def _parse_ls_ratio(self, api_data) -> dict:
-        latest = api_data[-1] if isinstance(api_data, list) else api_data
-        long_ratio = float(latest.get("longAccountRatio", 0.5))
-        short_ratio = float(latest.get("shortAccountRatio", 0.5))
-        ratio = long_ratio / short_ratio if short_ratio > 0 else 1.0
+    @staticmethod
+    def _parse_binance_ls(item: dict) -> dict:
+        """Parse Binance globalLongShortAccountRatio response item.
+
+        Binance returns: {"symbol":"BTCUSDT","longAccount":"0.5162",
+                          "shortAccount":"0.4838","longShortRatio":"1.0670",...}
+        """
+        long_ratio = float(item.get("longAccount", 0.5))
+        short_ratio = float(item.get("shortAccount", 0.5))
+        ratio = float(item.get("longShortRatio", 0)) or (
+            long_ratio / short_ratio if short_ratio > 0 else 1.0
+        )
         return {
             "long_pct": round(long_ratio * 100, 1),
             "short_pct": round(short_ratio * 100, 1),
             "ratio": round(ratio, 2),
-            "signal": self._ls_signal(ratio),
+            "signal": "contrarian_bearish" if ratio > 2.0 else (
+                "contrarian_bullish" if ratio < 0.5 else "neutral"
+            ),
         }
 
     @staticmethod
