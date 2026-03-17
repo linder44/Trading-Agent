@@ -3,7 +3,7 @@
 import json
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 import anthropic
 from loguru import logger
@@ -41,7 +41,7 @@ def _is_empty(v) -> bool:
                 return True
         except (TypeError, ValueError):
             pass
-        return v == 0
+        return False
     return False
 
 
@@ -461,7 +461,7 @@ class TradingBrain:
         """Build the analysis prompt with all market data."""
 
         prompt = f"""## Current Time
-{datetime.utcnow().isoformat()} UTC
+{datetime.now(timezone.utc).isoformat()} UTC
 
 ## Account Balance
 USDT Available: {balance:.2f}
@@ -590,7 +590,7 @@ Return your decisions as JSON.
     def _log_decision(self, decision: dict):
         """Log decision for audit trail."""
         entry = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "decisions": decision.get("decisions", []),
             "outlook": decision.get("market_outlook", ""),
             "risk": decision.get("risk_level", ""),

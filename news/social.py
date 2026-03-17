@@ -6,7 +6,7 @@ All sources are free and require no API keys:
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from loguru import logger
@@ -116,7 +116,7 @@ class SocialSentiment:
         return {
             "social_trending": self.fetch_coingecko_trending(),
             "sector_performance": self.fetch_sector_performance(),
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
 
     def _is_cached(self, key: str) -> bool:

@@ -1,7 +1,7 @@
 """Risk management module."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from loguru import logger
 
@@ -16,7 +16,7 @@ class Position:
     amount: float
     stop_loss: float
     take_profit: float
-    opened_at: datetime = field(default_factory=datetime.utcnow)
+    opened_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     order_ids: list[str] = field(default_factory=list)
 
 

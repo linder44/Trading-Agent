@@ -7,7 +7,7 @@ Tracks assets correlated with crypto to provide broader market context:
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from loguru import logger
@@ -105,7 +105,7 @@ class MarketCorrelations:
         data = {
             "btc_dominance": self.get_btc_dominance(),
             "stablecoin_market": self.get_stablecoin_market(),
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
         return data
 

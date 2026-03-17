@@ -124,8 +124,6 @@ class TechnicalAnalyzer:
             return {"vpoc": float(price_min), "vah": float(price_max), "val": float(price_min)}
 
         # Create price bins
-        bin_edges = pd.np_compat = None  # avoid stale import
-        import numpy as np
         bins = np.linspace(price_min, price_max, num_bins + 1)
         bin_centers = (bins[:-1] + bins[1:]) / 2
 

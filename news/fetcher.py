@@ -10,7 +10,7 @@ Sources (in priority order):
 """
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from loguru import logger
@@ -142,7 +142,7 @@ class NewsFetcher:
                     "q": query,
                     "sortBy": "publishedAt",
                     "pageSize": 20,
-                    "from": (datetime.utcnow() - timedelta(hours=24)).isoformat(),
+                    "from": (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(),
                     "language": "en",
                     "apiKey": self.cfg.api_key,
                 },
@@ -260,7 +260,7 @@ class NewsFetcher:
             ],
             "trending_coins": trending[:7],
             "fear_greed_index": fear_greed,
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
 
     # ─── Cache helpers ────────────────────────────────────────────

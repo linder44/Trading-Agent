@@ -14,7 +14,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -286,7 +286,7 @@ class Backtester:
             "total_pnl": round(self.balance - self.initial_balance, 2),
             "trades": self.trades,
             "equity_curve": self.equity_curve,
-            "run_at": datetime.utcnow().isoformat(),
+            "run_at": datetime.now(timezone.utc).isoformat(),
         }
         filename = f"data/backtest_{self.symbol.replace('/', '_')}_{self.days}d.json"
         Path(filename).write_text(json.dumps(results, indent=2))
