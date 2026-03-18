@@ -214,17 +214,26 @@ class ExchangeClient:
         Когда цена достигает trigger_price — открывается рыночный ордер,
         а SL и TP автоматически выставляются на позицию.
 
-        Bitget plan orders используют нативные параметры presetStopLossPrice
-        и presetStopSurplusPrice (не ccxt-овские stopLoss/takeProfit,
-        которые работают только для обычных ордеров).
+        Используем ccxt unified params 'stopLoss' и 'takeProfit' —
+        ccxt сам конвертирует их в правильные Bitget-поля:
+        - Для plan orders: stopLossTriggerPrice, stopLossTriggerType,
+          stopSurplusTriggerPrice, stopSurplusTriggerType
+        - Для обычных: presetStopLossPrice, presetStopSurplusPrice
+
+        Прямые Bitget-поля (preset*, stopSurplus*) НЕ работают через ccxt —
+        ccxt их не обрабатывает и они попадают на неправильный endpoint.
         """
         params = {
             "triggerPrice": trigger_price,
             "triggerType": "mark_price",
-            "presetStopLossPrice": str(stop_loss),
-            "presetStopLossTriggerType": "mark_price",
-            "presetStopSurplusPrice": str(take_profit),
-            "presetStopSurplusTriggerType": "mark_price",
+            "stopLoss": {
+                "triggerPrice": stop_loss,
+                "type": "mark_price",
+            },
+            "takeProfit": {
+                "triggerPrice": take_profit,
+                "type": "mark_price",
+            },
         }
         order = self.exchange.create_order(symbol, "market", side, amount, params=params)
         logger.info(
