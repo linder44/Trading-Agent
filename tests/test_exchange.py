@@ -1,7 +1,8 @@
 """Tests for exchange client — trigger orders and SL/TP orders.
 
 Verifies that Bitget-specific parameters are passed correctly to ccxt,
-particularly triggerType values that caused error 400172.
+particularly triggerType values that caused error 400172,
+and preset SL/TP params (stopSurplusTriggerType fix for error 40017).
 """
 
 import os
@@ -152,6 +153,133 @@ class TestCreateMarketOrderWithSLTP(unittest.TestCase):
         self.assertEqual(args[1], "market")
 
 
+class TestTriggerOrderWithSLTP(unittest.TestCase):
+    """Test create_trigger_order_with_sltp — Bitget preset SL/TP params.
+
+    Bitget plan orders require:
+    - presetStopLossPrice + presetStopLossTriggerType
+    - presetStopSurplusPrice + presetStopSurplusTriggerType
+    Missing triggerType fields cause error 40017:
+    'Parameter verification failed stopSurplusTriggerType'
+    """
+
+    def setUp(self):
+        with patch("exchange.client.ccxt.bitget") as mock_bitget:
+            mock_exchange = MagicMock()
+            mock_exchange.markets = {
+                "BTC/USDT:USDT": {"swap": True},
+                "ETH/USDT:USDT": {"swap": True},
+            }
+            mock_bitget.return_value = mock_exchange
+
+            from config import BitgetConfig
+            cfg = BitgetConfig()
+            cfg.api_key = ""
+            cfg.secret_key = ""
+            cfg.passphrase = ""
+            cfg.demo = False
+
+            from exchange.client import ExchangeClient
+            self.client = ExchangeClient(cfg)
+            self.mock_exchange = mock_exchange
+
+    def test_trigger_sltp_has_preset_stop_loss_price(self):
+        """Must include presetStopLossPrice."""
+        self.mock_exchange.create_order.return_value = {"id": "t1"}
+        self.client.create_trigger_order_with_sltp(
+            "BTC/USDT:USDT", "buy", 0.01, 95000.0, 93000.0, 99000.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+        self.assertEqual(params["presetStopLossPrice"], str(93000.0))
+
+    def test_trigger_sltp_has_preset_stop_surplus_price(self):
+        """Must include presetStopSurplusPrice (take profit)."""
+        self.mock_exchange.create_order.return_value = {"id": "t2"}
+        self.client.create_trigger_order_with_sltp(
+            "BTC/USDT:USDT", "buy", 0.01, 95000.0, 93000.0, 99000.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+        self.assertEqual(params["presetStopSurplusPrice"], str(99000.0))
+
+    def test_trigger_sltp_has_stop_loss_trigger_type(self):
+        """Must include presetStopLossTriggerType — missing causes Bitget error."""
+        self.mock_exchange.create_order.return_value = {"id": "t3"}
+        self.client.create_trigger_order_with_sltp(
+            "BTC/USDT:USDT", "buy", 0.01, 95000.0, 93000.0, 99000.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+        self.assertIn("presetStopLossTriggerType", params,
+                      "Missing presetStopLossTriggerType causes Bitget param error")
+        self.assertEqual(params["presetStopLossTriggerType"], "mark_price")
+
+    def test_trigger_sltp_has_stop_surplus_trigger_type(self):
+        """Must include presetStopSurplusTriggerType — the exact field from error 40017."""
+        self.mock_exchange.create_order.return_value = {"id": "t4"}
+        self.client.create_trigger_order_with_sltp(
+            "BTC/USDT:USDT", "buy", 0.01, 95000.0, 93000.0, 99000.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+        self.assertIn("presetStopSurplusTriggerType", params,
+                      "Missing presetStopSurplusTriggerType causes Bitget error 40017")
+        self.assertEqual(params["presetStopSurplusTriggerType"], "mark_price")
+
+    def test_trigger_sltp_has_trigger_price_and_type(self):
+        """Main trigger params must also be present."""
+        self.mock_exchange.create_order.return_value = {"id": "t5"}
+        self.client.create_trigger_order_with_sltp(
+            "BTC/USDT:USDT", "buy", 0.01, 95000.0, 93000.0, 99000.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+        self.assertEqual(params["triggerPrice"], 95000.0)
+        self.assertEqual(params["triggerType"], "mark_price")
+
+    def test_trigger_sltp_sell_side(self):
+        """Short-side trigger orders must also have all preset params."""
+        self.mock_exchange.create_order.return_value = {"id": "t6"}
+        self.client.create_trigger_order_with_sltp(
+            "ETH/USDT:USDT", "sell", 0.5, 3500.0, 3700.0, 3200.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+
+        # All 6 required params
+        self.assertEqual(params["triggerPrice"], 3500.0)
+        self.assertEqual(params["triggerType"], "mark_price")
+        self.assertEqual(params["presetStopLossPrice"], str(3700.0))
+        self.assertEqual(params["presetStopLossTriggerType"], "mark_price")
+        self.assertEqual(params["presetStopSurplusPrice"], str(3200.0))
+        self.assertEqual(params["presetStopSurplusTriggerType"], "mark_price")
+
+    def test_trigger_sltp_no_ccxt_stopLoss_takeProfit(self):
+        """Must NOT use ccxt stopLoss/takeProfit dicts — they don't work for plan orders."""
+        self.mock_exchange.create_order.return_value = {"id": "t7"}
+        self.client.create_trigger_order_with_sltp(
+            "BTC/USDT:USDT", "buy", 0.01, 95000.0, 93000.0, 99000.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+        self.assertNotIn("stopLoss", params,
+                         "ccxt stopLoss dict does not work for Bitget plan orders")
+        self.assertNotIn("takeProfit", params,
+                         "ccxt takeProfit dict does not work for Bitget plan orders")
+
+    def test_trigger_sltp_prices_are_strings(self):
+        """Bitget API expects preset prices as strings."""
+        self.mock_exchange.create_order.return_value = {"id": "t8"}
+        self.client.create_trigger_order_with_sltp(
+            "BTC/USDT:USDT", "buy", 0.01, 95000.0, 93000.0, 99000.0,
+        )
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+        self.assertIsInstance(params["presetStopLossPrice"], str)
+        self.assertIsInstance(params["presetStopSurplusPrice"], str)
+
+
 class TestPlaceTriggerOrderIntegration(unittest.TestCase):
     """Test OrderManager.place_trigger_order passes correct params through."""
 
@@ -194,6 +322,30 @@ class TestPlaceTriggerOrderIntegration(unittest.TestCase):
         args, kwargs = self.mock_exchange.create_order.call_args
         params = args[4] if len(args) > 4 else kwargs.get("params", {})
         self.assertEqual(params["triggerType"], "mark_price")
+
+    def test_place_trigger_order_has_preset_sltp(self):
+        """Full flow must pass preset SL/TP with trigger types."""
+        result = self.order_mgr.place_trigger_order(
+            "BTC/USDT:USDT", "long", 10000.0, 95000.0,
+        )
+
+        if result is None:
+            return
+
+        args, kwargs = self.mock_exchange.create_order.call_args
+        params = args[4] if len(args) > 4 else kwargs.get("params", {})
+
+        # Must have all 4 preset fields
+        self.assertIn("presetStopLossPrice", params)
+        self.assertIn("presetStopLossTriggerType", params)
+        self.assertIn("presetStopSurplusPrice", params)
+        self.assertIn("presetStopSurplusTriggerType", params)
+
+        # Result must contain SL/TP values
+        self.assertIn("stop_loss", result)
+        self.assertIn("take_profit", result)
+        self.assertGreater(result["stop_loss"], 0)
+        self.assertGreater(result["take_profit"], 0)
 
 
 if __name__ == "__main__":

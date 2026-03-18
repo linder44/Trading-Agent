@@ -222,7 +222,9 @@ class ExchangeClient:
             "triggerPrice": trigger_price,
             "triggerType": "mark_price",
             "presetStopLossPrice": str(stop_loss),
+            "presetStopLossTriggerType": "mark_price",
             "presetStopSurplusPrice": str(take_profit),
+            "presetStopSurplusTriggerType": "mark_price",
         }
         order = self.exchange.create_order(symbol, "market", side, amount, params=params)
         logger.info(
