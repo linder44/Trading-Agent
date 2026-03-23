@@ -28,6 +28,7 @@ from analysis.trade_history import TradeHistoryTracker
 from analysis.liquidations import LiquidationAnalyzer
 from analysis.cross_correlation import CrossCorrelationAnalyzer
 from analysis.time_context import TimeContextAnalyzer
+from analysis.scalping import ScalpingAnalyzer
 from news.fetcher import NewsFetcher
 from news.social import SocialSentiment
 from risk.manager import RiskManager
@@ -78,6 +79,7 @@ class TradingAgent:
         self.liquidations = LiquidationAnalyzer()
         self.cross_corr = CrossCorrelationAnalyzer()
         self.time_context = TimeContextAnalyzer()
+        self.scalping = ScalpingAnalyzer()
 
         # Валидация символов на бирже
         self.symbols = self.exchange.validate_symbols(config.trading.symbols)
@@ -111,9 +113,31 @@ class TradingAgent:
         if self.mode in ("demo", "live"):
             self.orders.sync_positions_from_exchange()
 
-        # 1. Technical analysis (multi-timeframe)
+        # 0. Авто-закрытие просроченных позиций (макс. 2 часа)
+        max_age = config.trading.max_position_age_minutes
+        expired = self.risk.get_expired_positions(max_age)
+        for symbol in expired:
+            logger.warning(f"Позиция {symbol} просрочена (>{max_age} мин), принудительно закрываем")
+            if self.mode == "paper":
+                try:
+                    ticker = self.exchange.fetch_ticker(symbol)
+                    price = ticker["last"]
+                    pnl = self.risk.close_position(symbol, price)
+                    self.paper_balance += pnl
+                    logger.info(f"[БУМАГА] Принудительное закрытие {symbol} @ {price} | PnL: {pnl:+.2f}")
+                except Exception as e:
+                    logger.error(f"Ошибка принудительного закрытия {symbol}: {e}")
+            else:
+                result = self.orders.close_position(symbol)
+                if result:
+                    self.notifier.send(
+                        f"\u23F0 <b>АВТО-ЗАКРЫТИЕ (>{max_age} мин)</b>\n"
+                        f"{symbol} | PnL: {result.get('pnl', 0):+.2f} USDT"
+                    )
+
+        # 1. Technical analysis (multi-timeframe: 1m, 5m, 15m)
         technical_data = {}
-        ohlcv_cache = {}  # Cache for pattern analysis
+        ohlcv_cache = {}
         for symbol in self.symbols:
             try:
                 ohlcv_dict = {}
@@ -137,13 +161,22 @@ class TradingAgent:
                 df_with_indicators = self.analyzer.compute_indicators(df)
                 pattern_data[symbol][tf] = self.patterns.get_full_pattern_analysis(df_with_indicators)
 
-        # 2b. Количественный / научный анализ
-        logger.info("Запускаем количественный анализ (Хёрст, Калман, FFT, VaR, энтропия)...")
+        # 2b. Количественный анализ (короткие окна для скальпинга)
+        logger.info("Запускаем количественный анализ (скальпинг-режим)...")
         quant_data = {}
         for symbol, ohlcv_dict in ohlcv_cache.items():
             quant_data[symbol] = {}
             for tf, df in ohlcv_dict.items():
-                quant_data[symbol][tf] = self.quant.full_quant_analysis(df)
+                quant_data[symbol][tf] = self.quant.full_quant_analysis(df, short_term=True)
+
+        # 2c. Скальпинг-анализ (микроструктура, order flow, momentum bursts)
+        logger.info("Запускаем скальпинг-анализ (order flow, микро-моментум, спред)...")
+        scalping_data = {}
+        for symbol, ohlcv_dict in ohlcv_cache.items():
+            # Используем самый короткий таймфрейм для скальпинг-анализа
+            shortest_tf = config.trading.timeframes[0]  # "1m"
+            if shortest_tf in ohlcv_dict:
+                scalping_data[symbol] = self.scalping.full_scalping_analysis(ohlcv_dict[shortest_tf])
 
         # 3. Ончейн и деривативы
         logger.info("Загружаем ончейн-данные (фандинг, OI, киты)...")
@@ -157,7 +190,7 @@ class TradingAgent:
         logger.info("Загружаем социальные данные (тренды, секторы)...")
         social_data = self.social.get_full_social_data()
 
-        # 6. Рыночные корреляции (DXY, S&P500, доминация BTC)
+        # 6. Рыночные корреляции
         logger.info("Загружаем рыночные корреляции (BTC Dominance, стейблкоины)...")
         correlation_data = self.correlations.get_full_correlation_data()
 
@@ -201,7 +234,7 @@ class TradingAgent:
         self._log_data_quality(onchain_data, market_context, social_data, correlation_data)
 
         # 9. Отправляем ВСЁ в Claude AI для принятия решений
-        logger.info("Отправляем данные в Claude AI для анализа...")
+        logger.info("Отправляем данные в Claude AI для анализа (скальпинг-режим)...")
         decision = self.brain.analyze_and_decide(
             technical_data=technical_data,
             market_context=market_context,
@@ -216,12 +249,13 @@ class TradingAgent:
             cross_corr_data=cross_corr_data,
             time_context_data=time_context_data,
             trade_history_data=trade_history_data,
+            scalping_data=scalping_data,
         )
 
         logger.info(f"Прогноз ИИ: {decision.get('market_outlook', 'Н/Д')}")
         logger.info(f"Уровень риска: {decision.get('risk_level', 'Н/Д')}")
 
-        # 9. Execute decisions
+        # 10. Execute decisions
         actions = decision.get("decisions", [])
         for action in actions:
             self._execute_decision(action, balance)
@@ -610,9 +644,9 @@ class TradingAgent:
         return f"\U0001F916 <b>{text}</b>"
 
     def _get_atr(self, symbol: str) -> float | None:
-        """Get latest ATR value for a symbol."""
+        """Get latest ATR value for a symbol (5m timeframe for scalping)."""
         try:
-            df = self.exchange.fetch_ohlcv(symbol, "1h", limit=50)
+            df = self.exchange.fetch_ohlcv(symbol, "5m", limit=50)
             df_analyzed = self.analyzer.compute_indicators(df)
             return float(df_analyzed["atr"].iloc[-1])
         except Exception:

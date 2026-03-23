@@ -1,7 +1,7 @@
 """Risk management module."""
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 
@@ -65,10 +65,12 @@ class RiskManager:
         return True, "OK"
 
     def compute_stop_loss(self, entry_price: float, side: str, atr: float | None = None) -> float:
-        """Compute stop loss price. Uses ATR if available, otherwise fixed %."""
+        """Compute stop loss price. Uses ATR if available, otherwise fixed %.
+
+        For scalping: 1.5x ATR (tighter than 2x for longer trades).
+        """
         if atr and atr > 0:
-            # 2x ATR stop loss
-            offset = atr * 2
+            offset = atr * 1.5  # Тайтовый SL для скальпинга
         else:
             offset = entry_price * self.cfg.stop_loss_pct
 
@@ -78,9 +80,12 @@ class RiskManager:
             return entry_price + offset
 
     def compute_take_profit(self, entry_price: float, side: str, atr: float | None = None) -> float:
-        """Compute take profit price. Target 2:1 risk-reward."""
+        """Compute take profit price. Target 2:1 risk-reward.
+
+        For scalping: 3x ATR (2:1 RR with 1.5x ATR stop).
+        """
         if atr and atr > 0:
-            offset = atr * 4  # 2:1 RR with 2x ATR stop
+            offset = atr * 3  # 2:1 RR с 1.5x ATR стопом
         else:
             offset = entry_price * self.cfg.take_profit_pct
 
@@ -135,6 +140,7 @@ class RiskManager:
                     "stop_loss": p.stop_loss,
                     "take_profit": p.take_profit,
                     "opened_at": p.opened_at.isoformat(),
+                    "age_minutes": round((datetime.now(timezone.utc) - p.opened_at).total_seconds() / 60, 1),
                 }
                 for p in self.positions.values()
             ],
@@ -197,6 +203,30 @@ class RiskManager:
             except Exception as e:
                 logger.warning(f"Trailing stop check failed for {symbol}: {e}")
         return updates
+
+    def get_expired_positions(self, max_age_minutes: int = 120) -> list[str]:
+        """Return symbols of positions older than max_age_minutes.
+
+        Used to enforce the 2-hour max position lifetime for scalping.
+        """
+        now = datetime.now(timezone.utc)
+        expired = []
+        for symbol, pos in self.positions.items():
+            age = now - pos.opened_at
+            if age > timedelta(minutes=max_age_minutes):
+                expired.append(symbol)
+                logger.info(
+                    f"Позиция {symbol} просрочена: возраст {age.total_seconds() / 60:.0f} мин "
+                    f"(макс {max_age_minutes} мин)"
+                )
+        return expired
+
+    def get_position_age_minutes(self, symbol: str) -> float | None:
+        """Return age of position in minutes, or None if no position."""
+        if symbol not in self.positions:
+            return None
+        age = datetime.now(timezone.utc) - self.positions[symbol].opened_at
+        return age.total_seconds() / 60
 
     def reset_daily_stats(self):
         """Reset daily counters (call at start of new day)."""

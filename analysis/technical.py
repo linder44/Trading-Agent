@@ -38,23 +38,34 @@ class TechnicalAnalyzer:
                 df[col] = float("nan")
             return df
 
-        # Trend indicators
+        # Trend indicators (быстрые EMA для скальпинга + стандартные)
+        df["ema_3"] = ta.trend.ema_indicator(df["close"], window=3)
+        df["ema_5"] = ta.trend.ema_indicator(df["close"], window=5)
+        df["ema_8"] = ta.trend.ema_indicator(df["close"], window=8)
         df["ema_9"] = ta.trend.ema_indicator(df["close"], window=9)
+        df["ema_13"] = ta.trend.ema_indicator(df["close"], window=13)
         df["ema_21"] = ta.trend.ema_indicator(df["close"], window=21)
         df["ema_50"] = ta.trend.ema_indicator(df["close"], window=50)
         df["ema_200"] = ta.trend.ema_indicator(df["close"], window=200)
         df["sma_50"] = ta.trend.sma_indicator(df["close"], window=50)
         df["sma_200"] = ta.trend.sma_indicator(df["close"], window=200)
 
-        # MACD
+        # MACD (стандартный + быстрый для скальпинга)
         macd = ta.trend.MACD(df["close"])
         df["macd"] = macd.macd()
         df["macd_signal"] = macd.macd_signal()
         df["macd_histogram"] = macd.macd_diff()
 
-        # RSI
+        # Быстрый MACD для скальпинга (5, 13, 4)
+        macd_fast = ta.trend.MACD(df["close"], window_slow=13, window_fast=5, window_sign=4)
+        df["macd_fast"] = macd_fast.macd()
+        df["macd_fast_signal"] = macd_fast.macd_signal()
+        df["macd_fast_histogram"] = macd_fast.macd_diff()
+
+        # RSI (стандартный + быстрые для скальпинга)
         df["rsi"] = ta.momentum.rsi(df["close"], window=14)
         df["rsi_6"] = ta.momentum.rsi(df["close"], window=6)
+        df["rsi_3"] = ta.momentum.rsi(df["close"], window=3)
 
         # Stochastic RSI
         stoch_rsi = ta.momentum.StochRSIIndicator(df["close"])
@@ -354,13 +365,22 @@ class TechnicalAnalyzer:
         summary = {
             "symbol": symbol,
             "price": round(float(latest["close"]), 6),
-            "change_1h": round(float((latest["close"] - prev["close"]) / prev["close"] * 100), 2),
+            "change_1_candle": round(float((latest["close"] - prev["close"]) / prev["close"] * 100), 4),
+
+            # Scalping EMA (быстрые)
+            "ema_3": round(float(latest.get("ema_3", 0)), 6),
+            "ema_5": round(float(latest.get("ema_5", 0)), 6),
+            "ema_8": round(float(latest.get("ema_8", 0)), 6),
+            "ema_13": round(float(latest.get("ema_13", 0)), 6),
 
             # Trend
             "ema_9": round(float(latest["ema_9"]), 6),
             "ema_21": round(float(latest["ema_21"]), 6),
             "ema_50": round(float(latest["ema_50"]), 6),
             "ema_200": round(float(latest.get("ema_200", 0)), 6),
+            "scalp_trend": "bullish" if latest.get("ema_3", 0) > latest.get("ema_8", 0) > latest.get("ema_21", 0) else (
+                "bearish" if latest.get("ema_3", 0) < latest.get("ema_8", 0) < latest.get("ema_21", 0) else "mixed"
+            ),
             "trend_short": "bullish" if latest["ema_9"] > latest["ema_21"] else "bearish",
             "trend_medium": "bullish" if latest["ema_21"] > latest["ema_50"] else "bearish",
             "golden_cross": bool(latest["sma_50"] > latest["sma_200"]),
@@ -374,6 +394,14 @@ class TechnicalAnalyzer:
             "macd_crossover": "bullish" if latest["macd"] > latest["macd_signal"] and prev["macd"] <= prev["macd_signal"] else (
                 "bearish" if latest["macd"] < latest["macd_signal"] and prev["macd"] >= prev["macd_signal"] else "none"
             ),
+            # Быстрый MACD для скальпинга
+            "macd_fast": round(float(latest.get("macd_fast", 0)), 6),
+            "macd_fast_signal": round(float(latest.get("macd_fast_signal", 0)), 6),
+            "macd_fast_histogram": round(float(latest.get("macd_fast_histogram", 0)), 6),
+            "macd_fast_crossover": "bullish" if latest.get("macd_fast", 0) > latest.get("macd_fast_signal", 0) and prev.get("macd_fast", 0) <= prev.get("macd_fast_signal", 0) else (
+                "bearish" if latest.get("macd_fast", 0) < latest.get("macd_fast_signal", 0) and prev.get("macd_fast", 0) >= prev.get("macd_fast_signal", 0) else "none"
+            ),
+            "rsi_3": round(float(latest.get("rsi_3", 50)), 2),
             "stoch_rsi_k": round(float(latest["stoch_rsi_k"]), 2),
             "stoch_rsi_d": round(float(latest["stoch_rsi_d"]), 2),
 
@@ -417,10 +445,35 @@ class TechnicalAnalyzer:
             "order_blocks": self.detect_order_blocks(df),
             # Liquidity zones (stop hunt areas)
             "liquidity_zones": self.detect_liquidity_zones(df),
+
+            # Скальпинг-метрики
+            "momentum_roc_3": round(float((latest["close"] - df["close"].iloc[-4]) / df["close"].iloc[-4] * 100), 4) if len(df) > 4 else 0,
+            "momentum_roc_5": round(float((latest["close"] - df["close"].iloc[-6]) / df["close"].iloc[-6] * 100), 4) if len(df) > 6 else 0,
+            "candle_body_pct": round(float(abs(latest["close"] - latest["open"]) / latest["close"] * 100), 4),
+            "candle_direction": "bullish" if latest["close"] > latest["open"] else "bearish",
+            "upper_wick_pct": round(float((latest["high"] - max(latest["close"], latest["open"])) / latest["close"] * 100), 4),
+            "lower_wick_pct": round(float((min(latest["close"], latest["open"]) - latest["low"]) / latest["close"] * 100), 4),
+            "consecutive_direction": self._count_consecutive_candles(df),
+            "price_vs_ema8": round(float((latest["close"] - latest.get("ema_8", latest["close"])) / latest["close"] * 100), 4) if not pd.isna(latest.get("ema_8", float("nan"))) else 0,
         }
 
         logger.debug(f"Analysis summary for {symbol}: RSI={summary['rsi']}, trend={summary['trend_short']}")
         return summary
+
+    @staticmethod
+    def _count_consecutive_candles(df: pd.DataFrame) -> dict:
+        """Count consecutive bullish/bearish candles from the most recent."""
+        if len(df) < 2:
+            return {"direction": "none", "count": 0}
+        direction = "bullish" if df["close"].iloc[-1] > df["open"].iloc[-1] else "bearish"
+        count = 0
+        for i in range(len(df) - 1, -1, -1):
+            is_bull = df["close"].iloc[i] > df["open"].iloc[i]
+            if (direction == "bullish" and is_bull) or (direction == "bearish" and not is_bull):
+                count += 1
+            else:
+                break
+        return {"direction": direction, "count": count}
 
     def multi_timeframe_analysis(self, ohlcv_dict: dict[str, pd.DataFrame], symbol: str) -> dict:
         """Analyze multiple timeframes and combine signals."""

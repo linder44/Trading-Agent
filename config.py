@@ -29,30 +29,24 @@ class ClaudeConfig(BaseModel):
 
 class TradingConfig(BaseModel):
     symbols: list[str] = [
-        # Топ-капитализация (доступны на Bitget фьючерсах)
+        # Высоколиквидные пары для краткосрочной торговли (скальпинг)
         "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
         "XRP/USDT",
         "BNB/USDT",
-        "ADA/USDT",
         "DOGE/USDT",
-        "AVAX/USDT",
-        "DOT/USDT",
-        "LINK/USDT",
-        "UNI/USDT",
-        "LTC/USDT",
-        "NEAR/USDT",
         "PEPE/USDT",
     ]
-    timeframes: list[str] = ["1h", "4h", "1d"]
-    max_position_pct: float = 0.1  # Max 10% of portfolio per trade
-    max_open_positions: int = 10
-    default_leverage: int = 1  # No leverage by default (safe)
-    stop_loss_pct: float = 0.03  # 3% stop loss
-    take_profit_pct: float = 0.06  # 6% take profit (2:1 RR)
-    trailing_stop_pct: float = 0.02  # 2% trailing stop
-    analysis_interval_minutes: int = 30
+    timeframes: list[str] = ["1m", "5m", "15m"]  # Короткие таймфреймы для скальпинга
+    max_position_pct: float = 0.08  # Max 8% портфеля на сделку
+    max_open_positions: int = 5  # Меньше позиций, больше фокуса
+    default_leverage: int = 1  # Без плеча (безопасно)
+    stop_loss_pct: float = 0.005  # 0.5% стоп-лосс (для скальпинга)
+    take_profit_pct: float = 0.01  # 1.0% тейк-профит (2:1 RR)
+    trailing_stop_pct: float = 0.003  # 0.3% трейлинг-стоп
+    analysis_interval_minutes: int = 3  # Анализ каждые 3 минуты
+    max_position_age_minutes: int = 120  # Макс. время жизни позиции: 2 часа
 
 
 class PaperConfig(BaseModel):

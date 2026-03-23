@@ -638,20 +638,30 @@ class QuantAnalyzer:
     # COMBINED ANALYSIS
     # ──────────────────────────────────────────────
 
-    def full_quant_analysis(self, df: pd.DataFrame) -> dict:
-        """Run all quantitative analyses on a DataFrame."""
+    def full_quant_analysis(self, df: pd.DataFrame, short_term: bool = True) -> dict:
+        """Run all quantitative analyses on a DataFrame.
+
+        Args:
+            short_term: если True, использует укороченные окна для скальпинга.
+        """
         close = df["close"]
 
+        # Короткие окна для скальпинга
+        z_window = 20 if short_term else 50
+        lr_window = 20 if short_term else 50
+        er_window = 10 if short_term else 20
+        vol_span = 15 if short_term else 30
+
         result = {
-            "hurst_exponent": self.hurst_exponent(close),
-            "zscore": self.zscore_analysis(close),
-            "shannon_entropy": self.shannon_entropy(close),
+            "hurst_exponent": self.hurst_exponent(close, max_lag=50 if short_term else 100),
+            "zscore": self.zscore_analysis(close, window=z_window),
+            "shannon_entropy": self.shannon_entropy(close, bins=15 if short_term else 20),
             "kalman_filter": self.kalman_filter(close),
             "fft_cycles": self.fft_cycles(close),
-            "linear_regression": self.linear_regression_channel(df),
-            "autocorrelation": self.autocorrelation_analysis(close),
-            "volatility_forecast": self.volatility_forecast(close),
-            "efficiency_ratio": self.efficiency_ratio(close),
+            "linear_regression": self.linear_regression_channel(df, window=lr_window),
+            "autocorrelation": self.autocorrelation_analysis(close, max_lag=10 if short_term else 20),
+            "volatility_forecast": self.volatility_forecast(close, span=vol_span),
+            "efficiency_ratio": self.efficiency_ratio(close, window=er_window),
             "value_at_risk": self.value_at_risk(close),
         }
 
