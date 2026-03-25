@@ -28,6 +28,8 @@ class ScalpingAnalyzer:
             "volatility_regime": self.volatility_micro_regime(df),
             "price_action": self.price_action_signals(df),
             "spread_estimate": self.spread_estimation(df),
+            "cvd": self.cumulative_volume_delta(df),
+            "breakout": self.breakout_quality(df),
             "scalp_signal": self._aggregate_scalp_signal(df),
         }
 
@@ -346,6 +348,239 @@ class ScalpingAnalyzer:
             "spread_pct": round(avg_spread, 4),
             "signal": signal,
             "hint": hint,
+        }
+
+    @staticmethod
+    def cumulative_volume_delta(df: pd.DataFrame) -> dict:
+        """Cumulative Volume Delta (CVD) — accumulated buy minus sell volume.
+
+        Detects divergences between price and volume:
+        - Price rising + CVD falling = distribution (fake rally, expect reversal)
+        - Price falling + CVD rising = accumulation (fake dump, expect bounce)
+        - Price + CVD aligned = trend confirmed
+        """
+        if len(df) < 20:
+            return {"cvd": 0, "divergence": "insufficient_data", "signal": "neutral"}
+
+        # Estimate buy/sell volume from candle structure
+        deltas = []
+        for _, row in df.iterrows():
+            total_range = row["high"] - row["low"]
+            if total_range == 0:
+                deltas.append(0)
+                continue
+            buy_ratio = (row["close"] - row["low"]) / total_range
+            sell_ratio = (row["high"] - row["close"]) / total_range
+            delta = row["volume"] * (buy_ratio - sell_ratio)
+            deltas.append(delta)
+
+        cvd_series = np.cumsum(deltas)
+
+        # Recent CVD trend (last 10 vs previous 10)
+        cvd_recent = float(np.mean(cvd_series[-5:]))
+        cvd_prev = float(np.mean(cvd_series[-15:-5])) if len(cvd_series) >= 15 else float(np.mean(cvd_series[:5]))
+        cvd_trend = cvd_recent - cvd_prev
+
+        # Price trend
+        price_recent = float(df["close"].iloc[-1])
+        price_prev = float(df["close"].iloc[-10]) if len(df) >= 10 else float(df["close"].iloc[0])
+        price_change_pct = (price_recent - price_prev) / price_prev * 100
+
+        # Divergence detection
+        if price_change_pct > 0.1 and cvd_trend < 0:
+            divergence = "bearish_divergence"
+            signal = "distribution"
+            hint = "Price up but CVD down — sellers hiding, expect reversal"
+        elif price_change_pct < -0.1 and cvd_trend > 0:
+            divergence = "bullish_divergence"
+            signal = "accumulation"
+            hint = "Price down but CVD up — buyers accumulating, expect bounce"
+        elif price_change_pct > 0.1 and cvd_trend > 0:
+            divergence = "none"
+            signal = "bullish_confirmed"
+            hint = "Price and CVD aligned upward — strong move"
+        elif price_change_pct < -0.1 and cvd_trend < 0:
+            divergence = "none"
+            signal = "bearish_confirmed"
+            hint = "Price and CVD aligned downward — strong move"
+        else:
+            divergence = "none"
+            signal = "neutral"
+            hint = "No clear divergence"
+
+        return {
+            "cvd": round(float(cvd_series[-1]), 2),
+            "cvd_trend": round(cvd_trend, 2),
+            "price_change_pct": round(price_change_pct, 3),
+            "divergence": divergence,
+            "signal": signal,
+            "hint": hint,
+        }
+
+    @staticmethod
+    def multi_timeframe_trend_score(ohlcv_dict: dict[str, pd.DataFrame]) -> dict:
+        """Aggregate trend score across multiple timeframes (-1.0 to +1.0).
+
+        Checks EMA alignment, momentum direction, and volume on each timeframe.
+        |score| > 0.7 = strong setup, < 0.3 = no clear direction.
+        """
+        scores = {}
+        weights = {"1m": 0.2, "5m": 0.35, "15m": 0.45}  # Higher TF = more weight
+
+        for tf, df in ohlcv_dict.items():
+            if len(df) < 21:
+                continue
+
+            close = df["close"]
+            score = 0.0
+
+            # EMA alignment
+            ema_8 = close.ewm(span=8).mean().iloc[-1]
+            ema_21 = close.ewm(span=21).mean().iloc[-1]
+            current = close.iloc[-1]
+
+            if current > ema_8 > ema_21:
+                score += 1.0  # Bullish alignment
+            elif current < ema_8 < ema_21:
+                score -= 1.0  # Bearish alignment
+            elif current > ema_21:
+                score += 0.3
+            elif current < ema_21:
+                score -= 0.3
+
+            # Momentum (ROC-5)
+            roc = (close.iloc[-1] - close.iloc[-6]) / close.iloc[-6] * 100 if len(close) >= 6 else 0
+            if roc > 0.2:
+                score += 0.5
+            elif roc < -0.2:
+                score -= 0.5
+
+            # Volume trend (recent vs average)
+            if len(df) >= 20:
+                vol_recent = df["volume"].iloc[-5:].mean()
+                vol_avg = df["volume"].iloc[-20:].mean()
+                if vol_avg > 0 and vol_recent / vol_avg > 1.3:
+                    # High volume confirms the direction
+                    score *= 1.2
+
+            # Clamp to [-1.5, 1.5] before weighting
+            score = max(-1.5, min(1.5, score))
+            scores[tf] = round(score, 3)
+
+        if not scores:
+            return {"score": 0, "signal": "insufficient_data", "timeframe_scores": {}}
+
+        # Weighted aggregate
+        total_weight = 0
+        weighted_sum = 0
+        for tf, sc in scores.items():
+            w = weights.get(tf, 0.3)
+            weighted_sum += sc * w
+            total_weight += w
+
+        final_score = weighted_sum / total_weight if total_weight > 0 else 0
+        final_score = max(-1.0, min(1.0, final_score))
+
+        # Agreement check
+        signs = [1 if s > 0.2 else (-1 if s < -0.2 else 0) for s in scores.values()]
+        agreement = len(set(signs)) == 1 and signs[0] != 0
+
+        if final_score > 0.7:
+            signal = "strong_bullish"
+        elif final_score > 0.3:
+            signal = "moderate_bullish"
+        elif final_score < -0.7:
+            signal = "strong_bearish"
+        elif final_score < -0.3:
+            signal = "moderate_bearish"
+        else:
+            signal = "neutral"
+
+        return {
+            "score": round(final_score, 3),
+            "signal": signal,
+            "agreement": agreement,
+            "timeframe_scores": scores,
+        }
+
+    @staticmethod
+    def breakout_quality(df: pd.DataFrame, lookback: int = 20) -> dict:
+        """Evaluate quality of a potential breakout.
+
+        Filters fake breakouts by checking:
+        1. Volume at breakout > 1.5x average
+        2. Candle body > 60% of total range (strong close, not wicks)
+        3. Price actually breaks recent high/low
+
+        Returns quality score and whether breakout is confirmed.
+        """
+        if len(df) < lookback + 1:
+            return {"breakout": "none", "quality": 0, "signal": "insufficient_data"}
+
+        recent = df.iloc[-lookback - 1:-1]  # Previous candles (not current)
+        current = df.iloc[-1]
+
+        recent_high = recent["high"].max()
+        recent_low = recent["low"].min()
+
+        # Check if current candle breaks out
+        breaks_high = current["close"] > recent_high
+        breaks_low = current["close"] < recent_low
+
+        if not breaks_high and not breaks_low:
+            return {"breakout": "none", "quality": 0, "signal": "no_breakout"}
+
+        direction = "bullish" if breaks_high else "bearish"
+
+        # Quality checks
+        quality_score = 0
+
+        # 1. Volume confirmation
+        avg_vol = recent["volume"].mean()
+        vol_ratio = current["volume"] / avg_vol if avg_vol > 0 else 0
+        if vol_ratio > 2.0:
+            quality_score += 3
+        elif vol_ratio > 1.5:
+            quality_score += 2
+        elif vol_ratio > 1.0:
+            quality_score += 1
+
+        # 2. Body ratio (strong close)
+        body = abs(current["close"] - current["open"])
+        total_range = current["high"] - current["low"]
+        body_ratio = body / total_range if total_range > 0 else 0
+        if body_ratio > 0.7:
+            quality_score += 2
+        elif body_ratio > 0.5:
+            quality_score += 1
+
+        # 3. Close position (close near high for bullish, near low for bearish)
+        if total_range > 0:
+            if direction == "bullish":
+                close_position = (current["close"] - current["low"]) / total_range
+            else:
+                close_position = (current["high"] - current["close"]) / total_range
+            if close_position > 0.7:
+                quality_score += 1
+
+        # Classify
+        if quality_score >= 5:
+            quality_label = "high"
+            signal = f"confirmed_{direction}_breakout"
+        elif quality_score >= 3:
+            quality_label = "moderate"
+            signal = f"probable_{direction}_breakout"
+        else:
+            quality_label = "low"
+            signal = f"weak_{direction}_breakout"
+
+        return {
+            "breakout": direction,
+            "quality": quality_score,
+            "quality_label": quality_label,
+            "volume_ratio": round(vol_ratio, 2),
+            "body_ratio": round(body_ratio, 3),
+            "signal": signal,
         }
 
     def _aggregate_scalp_signal(self, df: pd.DataFrame) -> dict:

@@ -130,6 +130,118 @@ class TradeHistoryTracker:
         self.HISTORY_FILE.parent.mkdir(exist_ok=True)
         self.HISTORY_FILE.write_text(json.dumps(self._trades, indent=1, ensure_ascii=False))
 
+    def get_symbol_win_rate(self, symbol: str) -> float | None:
+        """Get win rate for a specific symbol. Returns None if < 5 trades."""
+        symbol_trades = [t for t in self._trades if t["symbol"] == symbol]
+        if len(symbol_trades) < 5:
+            return None
+        wins = sum(1 for t in symbol_trades if t["result"] == "win")
+        return wins / len(symbol_trades)
+
+    def get_performance_analysis(self) -> dict:
+        """Analyze trade performance for optimal conditions.
+
+        Returns insights on:
+        - Best/worst trading hours (UTC)
+        - Optimal trade duration
+        - Per-symbol edge
+        - Side bias (long vs short performance)
+        """
+        if len(self._trades) < 10:
+            return {"status": "insufficient_data", "min_trades_needed": 10}
+
+        # Parse hours from closed_at timestamps
+        hourly_stats: dict[int, dict] = {}
+        duration_buckets: dict[str, dict] = {
+            "0-15min": {"wins": 0, "losses": 0, "pnl": 0},
+            "15-60min": {"wins": 0, "losses": 0, "pnl": 0},
+            "60-120min": {"wins": 0, "losses": 0, "pnl": 0},
+        }
+        side_stats = {"long": {"wins": 0, "losses": 0, "pnl": 0},
+                      "short": {"wins": 0, "losses": 0, "pnl": 0}}
+
+        for t in self._trades:
+            # Hourly analysis
+            try:
+                closed = datetime.fromisoformat(t["closed_at"])
+                hour = closed.hour
+            except (KeyError, ValueError):
+                hour = None
+
+            if hour is not None:
+                if hour not in hourly_stats:
+                    hourly_stats[hour] = {"wins": 0, "losses": 0, "pnl": 0}
+                if t["result"] == "win":
+                    hourly_stats[hour]["wins"] += 1
+                elif t["result"] == "loss":
+                    hourly_stats[hour]["losses"] += 1
+                hourly_stats[hour]["pnl"] += t.get("pnl_usdt", 0)
+
+            # Duration analysis
+            dur = t.get("duration_minutes", 0)
+            if dur <= 15:
+                bucket = "0-15min"
+            elif dur <= 60:
+                bucket = "15-60min"
+            else:
+                bucket = "60-120min"
+
+            if t["result"] == "win":
+                duration_buckets[bucket]["wins"] += 1
+            elif t["result"] == "loss":
+                duration_buckets[bucket]["losses"] += 1
+            duration_buckets[bucket]["pnl"] += t.get("pnl_usdt", 0)
+
+            # Side analysis
+            side = t.get("side", "long")
+            if side in side_stats:
+                if t["result"] == "win":
+                    side_stats[side]["wins"] += 1
+                elif t["result"] == "loss":
+                    side_stats[side]["losses"] += 1
+                side_stats[side]["pnl"] += t.get("pnl_usdt", 0)
+
+        # Find best and worst hours
+        best_hour = max(hourly_stats.items(), key=lambda x: x[1]["pnl"])[0] if hourly_stats else None
+        worst_hour = min(hourly_stats.items(), key=lambda x: x[1]["pnl"])[0] if hourly_stats else None
+
+        # Best duration bucket
+        best_duration = max(duration_buckets.items(),
+                            key=lambda x: x[1]["pnl"])[0] if duration_buckets else None
+
+        # Per-symbol edge
+        symbol_edge = {}
+        for t in self._trades:
+            sym = t["symbol"]
+            if sym not in symbol_edge:
+                symbol_edge[sym] = {"trades": 0, "wins": 0, "pnl": 0}
+            symbol_edge[sym]["trades"] += 1
+            if t["result"] == "win":
+                symbol_edge[sym]["wins"] += 1
+            symbol_edge[sym]["pnl"] = round(symbol_edge[sym]["pnl"] + t.get("pnl_usdt", 0), 2)
+
+        # Calculate win rates for symbol edge
+        for sym in symbol_edge:
+            total = symbol_edge[sym]["trades"]
+            symbol_edge[sym]["win_rate"] = round(symbol_edge[sym]["wins"] / total * 100, 1) if total > 0 else 0
+
+        return {
+            "status": "ok",
+            "total_trades": len(self._trades),
+            "best_hour_utc": best_hour,
+            "worst_hour_utc": worst_hour,
+            "best_duration": best_duration,
+            "duration_stats": {k: {"pnl": round(v["pnl"], 2),
+                                   "win_rate": round(v["wins"] / (v["wins"] + v["losses"]) * 100, 1)
+                                   if (v["wins"] + v["losses"]) > 0 else 0}
+                              for k, v in duration_buckets.items()},
+            "side_stats": {k: {"pnl": round(v["pnl"], 2),
+                               "win_rate": round(v["wins"] / (v["wins"] + v["losses"]) * 100, 1)
+                               if (v["wins"] + v["losses"]) > 0 else 0}
+                          for k, v in side_stats.items()},
+            "symbol_edge": symbol_edge,
+        }
+
     def _load(self):
         """Load from disk if exists."""
         if self.HISTORY_FILE.exists():

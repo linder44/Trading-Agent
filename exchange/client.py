@@ -135,6 +135,19 @@ class ExchangeClient:
         """Get order book. Works without auth."""
         return self.exchange.fetch_order_book(symbol, limit)
 
+    def fetch_recent_trades(self, symbol: str, limit: int = 200) -> list[dict]:
+        """Fetch recent public trades for whale detection.
+
+        Returns list of trades with: price, amount, side, timestamp, cost.
+        Works without auth (public endpoint).
+        """
+        try:
+            trades = self.exchange.fetch_trades(symbol, limit=limit)
+            return trades
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки сделок {symbol}: {e}")
+            return []
+
     def create_market_order(self, symbol: str, side: str, amount: float, params: dict | None = None) -> dict:
         """Place a market order."""
         params = params or {}

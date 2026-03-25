@@ -153,24 +153,52 @@ SYSTEM_PROMPT = """Ты — скальпинг-трейдер криптовал
 - bullish_engulfing / bearish_engulfing → сильные сигналы
 - inside_bar → готовься к пробою
 
-### 10. Количественный анализ
+### 10. Cumulative Volume Delta (CVD)
+- bullish_confirmed = цена и CVD растут → сильный тренд, входи по направлению
+- bearish_confirmed = цена и CVD падают → сильный даунтренд
+- distribution (bearish_divergence) = цена растёт, CVD падает → фейковый рост, НЕ лонг
+- accumulation (bullish_divergence) = цена падает, CVD растёт → фейковый дамп, ищи лонг
+
+### 11. Whale Order Following
+- whale_buying (bias > 0.4) = крупные покупки → ищи лонг на уровнях китов
+- whale_selling (bias < -0.4) = крупные продажи → ищи шорт
+- trigger_levels = цены входа китов → выставляй trigger_long/trigger_short на этих уровнях
+- buy_walls = сильная поддержка, sell_walls = сильное сопротивление
+
+### 12. Order Book Depth
+- strong_bid_dominance → покупатели доминируют, поддержка цены → лонг
+- strong_ask_dominance → продавцы доминируют, давление сверху → шорт
+- weighted_imbalance учитывает расстояние от цены (ближние уровни важнее)
+- balanced = нет преимущества
+
+### 13. Breakout Quality Filter
+- confirmed_*_breakout (quality >= 5) = настоящий пробой → входи
+- weak_*_breakout = фейковый пробой → НЕ ВХОДИ
+- volume_ratio > 1.5x + body_ratio > 0.6 = качественный пробой
+
+### 14. Multi-Timeframe Trend Score
+- score > 0.7 = сильный бычий сетап → лонг с высокой уверенностью
+- score < -0.7 = сильный медвежий → шорт
+- agreement = true → все TF совпадают, лучший сетап
+
+### 15. Количественный анализ
 - _regime_consensus: trending → торгуй по тренду, mean_reverting → от экстремумов
 - Z-score |Z| > 2.0 → возврат к среднему
 - Kalman: цена далеко от kalman_price → возможен откат
 - Hurst > 0.6 → моментум работает, < 0.4 → mean reversion
 
-### 11. Мульти-таймфрейм для скальпинга
+### 16. Мульти-таймфрейм для скальпинга
 - 15m определяет НАПРАВЛЕНИЕ (не торгуй против 15m тренда)
 - 5m подтверждает сетап
 - 1m даёт точку входа
 - Минимум 2 из 3 таймфреймов должны совпадать
 
-### 12. Ончейн (контекст)
+### 17. Ончейн (контекст)
 - Экстремальный фандинг (>0.05%) → осторожно с лонгами
 - Рост OI + рост цены → сильный тренд, скальпируй по нему
 - Ликвидации extreme → НЕ ВХОДИ, жди стабилизации
 
-### 13. Управление открытыми позициями
+### 18. Управление открытыми позициями
 - Позиция старше 90 минут → рекомендуй ЗАКРЫТЬ (close)
 - Позиция в прибыли > 0.5% → подтяни стоп (update_sl)
 - Позиция в убытке и возраст > 60 мин → закрой, не жди
@@ -242,6 +270,10 @@ class TradingBrain:
         time_context_data: dict | None = None,
         trade_history_data: dict | None = None,
         scalping_data: dict | None = None,
+        whale_data: dict | None = None,
+        orderbook_data: dict | None = None,
+        mtf_scores: dict | None = None,
+        performance_data: dict | None = None,
     ) -> dict:
         """Send all data to Claude and get trading decisions."""
 
@@ -250,6 +282,7 @@ class TradingBrain:
             onchain_data, pattern_data, social_data, correlation_data,
             quant_data, liquidation_data, cross_corr_data,
             time_context_data, trade_history_data, scalping_data,
+            whale_data, orderbook_data, mtf_scores, performance_data,
         )
 
         prompt_chars = len(SYSTEM_PROMPT) + len(user_message)
@@ -319,6 +352,10 @@ class TradingBrain:
         time_context_data: dict | None = None,
         trade_history_data: dict | None = None,
         scalping_data: dict | None = None,
+        whale_data: dict | None = None,
+        orderbook_data: dict | None = None,
+        mtf_scores: dict | None = None,
+        performance_data: dict | None = None,
     ) -> str:
         """Build the analysis prompt with all market data."""
 
@@ -339,7 +376,16 @@ USDT Available: {balance:.2f}
                 prompt += f"**{tf}:** {_compact_json(data)}\n"
 
         if scalping_data:
-            prompt += f"\n## Scalping Microstructure (order flow, micro-momentum, spread)\n{_compact_json(scalping_data)}\n"
+            prompt += f"\n## Scalping Microstructure (order flow, CVD, momentum, breakout, spread)\n{_compact_json(scalping_data)}\n"
+
+        if whale_data:
+            prompt += f"\n## Whale Order Following (large trades + trigger levels)\n{_compact_json(whale_data)}\n"
+
+        if orderbook_data:
+            prompt += f"\n## Order Book Depth (bid/ask imbalance)\n{_compact_json(orderbook_data)}\n"
+
+        if mtf_scores:
+            prompt += f"\n## Multi-Timeframe Trend Score\n{_compact_json(mtf_scores)}\n"
 
         if pattern_data:
             prompt += f"\n## Candlestick Patterns, Fibonacci & Divergences\n{_compact_json(pattern_data)}\n"
@@ -370,6 +416,9 @@ USDT Available: {balance:.2f}
         if trade_history_data and trade_history_data.get("total_trades", 0) > 0:
             prompt += f"\n## Trade History\n{_compact_json(trade_history_data, indent=1)}\n"
 
+        if performance_data and performance_data.get("status") == "ok":
+            prompt += f"\n## Trade Performance Analysis (best hours, durations, symbol edge)\n{_compact_json(performance_data, indent=1)}\n"
+
         missing = self._detect_missing_data(
             onchain_data, market_context, social_data, correlation_data, quant_data,
         )
@@ -383,14 +432,18 @@ USDT Available: {balance:.2f}
 ## Instructions (SCALPING MODE)
 Analyze data for SHORT-TERM scalping (max 2 hours):
 1. CHECK scalp_signal verdict FIRST
-2. CHECK regime consensus (trending/mean-reverting)
-3. Verify timeframe alignment (1m + 5m + 15m)
-4. Look for fast EMA crosses (3/8/21) and fast MACD
-5. Use RSI-3 for extremes
-6. Check order flow and micro momentum
-7. Spread wide = DO NOT ENTER
-8. Positions older than 90 min = recommend CLOSE
-9. Cite specific indicator values in reason
+2. CHECK CVD for divergences (distribution/accumulation = avoid/counter-trade)
+3. CHECK whale data — whale trigger_levels = use trigger_long/trigger_short at those prices
+4. CHECK MTF trend score — |score| > 0.7 = high confidence setup
+5. CHECK breakout quality — only enter confirmed breakouts (quality >= 5)
+6. CHECK orderbook imbalance — confirms/denies direction
+7. Verify timeframe alignment (1m + 5m + 15m)
+8. Look for fast EMA crosses (3/8/21) and fast MACD
+9. Use RSI-3 for extremes
+10. Spread wide = DO NOT ENTER
+11. Positions older than 90 min = recommend CLOSE
+12. Use performance data to avoid worst symbols/hours
+13. Cite specific indicator values in reason
 
 Return your decisions as JSON.
 """

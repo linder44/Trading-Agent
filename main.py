@@ -29,6 +29,8 @@ from analysis.liquidations import LiquidationAnalyzer
 from analysis.cross_correlation import CrossCorrelationAnalyzer
 from analysis.time_context import TimeContextAnalyzer
 from analysis.scalping import ScalpingAnalyzer
+from analysis.whale_tracker import WhaleTracker
+from analysis.orderbook import OrderBookAnalyzer
 from news.fetcher import NewsFetcher
 from news.social import SocialSentiment
 from risk.manager import RiskManager
@@ -80,6 +82,8 @@ class TradingAgent:
         self.cross_corr = CrossCorrelationAnalyzer()
         self.time_context = TimeContextAnalyzer()
         self.scalping = ScalpingAnalyzer()
+        self.whale_tracker = WhaleTracker()
+        self.orderbook_analyzer = OrderBookAnalyzer()
 
         # Валидация символов на бирже
         self.symbols = self.exchange.validate_symbols(config.trading.symbols)
@@ -178,6 +182,35 @@ class TradingAgent:
             if shortest_tf in ohlcv_dict:
                 scalping_data[symbol] = self.scalping.full_scalping_analysis(ohlcv_dict[shortest_tf])
 
+        # 2d. Whale tracking (крупные ордера) и order book analysis
+        logger.info("Отслеживаем крупные ордера (whale tracking) и анализируем стакан...")
+        whale_data = {}
+        orderbook_data = {}
+        for symbol in self.symbols:
+            try:
+                # Whale tracking from recent trades
+                trades = self.exchange.fetch_recent_trades(symbol, limit=200)
+                if trades:
+                    ticker = self.exchange.fetch_ticker(symbol)
+                    current_price = ticker["last"]
+                    whale_data[symbol] = self.whale_tracker.analyze_trades(trades, current_price)
+
+                    # Order book depth analysis
+                    ob = self.exchange.fetch_order_book(symbol, limit=20)
+                    orderbook_data[symbol] = self.orderbook_analyzer.analyze(ob, current_price)
+
+                    # Whale wall detection from order book
+                    whale_walls = self.whale_tracker.analyze_order_book_walls(ob, current_price)
+                    whale_data[symbol]["walls"] = whale_walls
+            except Exception as e:
+                logger.warning(f"Ошибка whale/orderbook для {symbol}: {e}")
+
+        # 2e. Multi-timeframe trend score
+        logger.info("Вычисляем мульти-таймфрейм скор...")
+        mtf_scores = {}
+        for symbol, ohlcv_dict in ohlcv_cache.items():
+            mtf_scores[symbol] = self.scalping.multi_timeframe_trend_score(ohlcv_dict)
+
         # 3. Ончейн и деривативы
         logger.info("Загружаем ончейн-данные (фандинг, OI, киты)...")
         onchain_data = self.onchain.get_full_onchain_data(self.exchange, self.symbols)
@@ -235,6 +268,9 @@ class TradingAgent:
 
         # 9. Отправляем ВСЁ в Claude AI для принятия решений
         logger.info("Отправляем данные в Claude AI для анализа (скальпинг-режим)...")
+        # 8b. Performance analysis
+        performance_data = self.trade_history.get_performance_analysis()
+
         decision = self.brain.analyze_and_decide(
             technical_data=technical_data,
             market_context=market_context,
@@ -250,6 +286,10 @@ class TradingAgent:
             time_context_data=time_context_data,
             trade_history_data=trade_history_data,
             scalping_data=scalping_data,
+            whale_data=whale_data,
+            orderbook_data=orderbook_data,
+            mtf_scores=mtf_scores,
+            performance_data=performance_data,
         )
 
         logger.info(f"Прогноз ИИ: {decision.get('market_outlook', 'Н/Д')}")

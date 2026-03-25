@@ -31,8 +31,15 @@ class RiskManager:
         self.max_daily_loss_pct: float = 0.05  # 5% max daily loss
         self.max_daily_trades: int = 20
 
-    def calculate_position_size(self, balance: float, price: float, stop_loss_price: float) -> float:
-        """Calculate position size based on risk per trade."""
+    def calculate_position_size(self, balance: float, price: float, stop_loss_price: float,
+                                atr: float | None = None, win_rate: float | None = None) -> float:
+        """Calculate position size with dynamic adjustments.
+
+        Base sizing uses risk per trade (max_position_pct).
+        Dynamic adjustments:
+        - High volatility (ATR) → reduce size
+        - Win rate available → Kelly Criterion adjustment
+        """
         max_risk_amount = balance * self.cfg.max_position_pct
         risk_per_unit = abs(price - stop_loss_price)
 
@@ -46,7 +53,45 @@ class RiskManager:
         max_size = (balance * self.cfg.max_position_pct) / price
         size = min(size, max_size)
 
+        # Dynamic adjustment: volatility scaling
+        if atr and atr > 0 and price > 0:
+            atr_pct = atr / price
+            # High volatility = smaller position
+            if atr_pct > 0.015:  # ATR > 1.5% of price
+                size *= 0.6
+                logger.debug(f"Размер уменьшен на 40%: высокая волатильность (ATR={atr_pct:.3%})")
+            elif atr_pct > 0.01:  # ATR > 1%
+                size *= 0.8
+                logger.debug(f"Размер уменьшен на 20%: повышенная волатильность (ATR={atr_pct:.3%})")
+
+        # Dynamic adjustment: Kelly Criterion (simplified)
+        if win_rate is not None and win_rate > 0:
+            kelly = self._kelly_fraction(win_rate)
+            if kelly < 0.5:
+                size *= max(kelly * 2, 0.3)  # Scale down but keep at least 30%
+                logger.debug(f"Размер скорректирован по Kelly: win_rate={win_rate:.1%}, kelly={kelly:.3f}")
+
         return size
+
+    @staticmethod
+    def _kelly_fraction(win_rate: float, avg_win_loss_ratio: float = 2.0) -> float:
+        """Simplified Kelly Criterion for position sizing.
+
+        Kelly% = W - (1-W)/R
+        W = win rate (0-1)
+        R = avg win / avg loss ratio
+
+        Returns fraction of bankroll to risk (0 to 1).
+        Capped at 0.25 (quarter Kelly) for safety.
+        """
+        if win_rate <= 0 or win_rate >= 1:
+            return 0.1  # Default conservative
+        w = win_rate
+        r = avg_win_loss_ratio
+        kelly = w - (1 - w) / r
+        # Use quarter Kelly for safety
+        kelly = kelly * 0.25
+        return max(0.0, min(kelly, 0.25))
 
     def can_open_position(self, symbol: str, balance: float) -> tuple[bool, str]:
         """Check if we can open a new position."""
