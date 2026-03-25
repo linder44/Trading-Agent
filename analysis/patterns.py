@@ -270,9 +270,12 @@ class PatternRecognizer:
         return divergences
 
     def get_full_pattern_analysis(self, df: pd.DataFrame) -> dict:
-        """Run all pattern analysis on a DataFrame."""
+        """Run pattern analysis on a DataFrame.
+
+        REMOVED: Fibonacci levels — subjective, only useful on daily+ timeframes.
+        KEPT: candlestick patterns (simplified) + divergences (leading signals).
+        """
         return {
             "candlestick_patterns": self.detect_patterns(df),
-            "fibonacci_levels": self.compute_fibonacci_levels(df),
             "divergences": self.detect_divergences(df),
         }

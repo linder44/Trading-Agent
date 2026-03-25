@@ -1,4 +1,10 @@
-"""AI Trading Brain - Claude-powered decision engine for SCALPING."""
+"""AI Trading Brain - Claude-powered decision engine for SCALPING.
+
+Optimized: sends aggregated signal scores + top reasons instead of raw data.
+Prompt cut from 18 sections to focused scalping rules.
+Includes trade history feedback loop.
+Falls back to rule-based SignalAggregator when Claude API is unavailable.
+"""
 
 import json
 import math
@@ -95,125 +101,45 @@ def _repair_truncated_json(raw: str) -> dict | None:
         return None
 
 
-SYSTEM_PROMPT = """Ты — скальпинг-трейдер криптовалют. Ты открываешь ТОЛЬКО короткие сделки длительностью до 2 часов. Цель — маленькие быстрые профиты 0.3-1.0%.
+# ─────────────────────────────────────────────────────────────
+# OPTIMIZED SYSTEM PROMPT — cut from 18 sections to focused rules
+# ─────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """Ты — скальпинг AI-трейдер. Твоя ЕДИНСТВЕННАЯ цель: положительный PnL.
+Все текстовые поля (reason, market_outlook) — ТОЛЬКО на русском.
 
-ВАЖНО: Все текстовые поля (reason, market_outlook) пиши ТОЛЬКО на русском языке.
+ПРАВИЛА ВХОДА (в порядке приоритета):
+1. SPREAD: если spread > 0.15% → HOLD. Не обсуждается.
+2. REGIME: если режим = choppy → HOLD. Не пытайся найти сделку.
+3. TIER 1 КОНФЛИКТ: если order_flow и momentum дают разные направления → HOLD.
+4. RVOL: если rvol < 0.5 → HOLD. Нет объёма = нет движения.
+5. CONFIRMATION: для входа нужно минимум 2 из 3: order_flow + momentum + tape_signal.
 
-## Режим работы: СКАЛЬПИНГ (1m / 5m / 15m)
-- Таймфреймы: 1m (вход), 5m (подтверждение), 15m (контекст тренда)
-- Время в сделке: 5-120 минут (МАКСИМУМ 2 часа)
-- Цель прибыли: 0.3-1.0% за сделку
-- Стоп-лосс: 0.3-0.5% (тайтовый)
-- Risk/Reward: минимум 1.5:1
+ТИПЫ СДЕЛОК:
+- MOMENTUM: trend strong, EMA aligned, delta stacked → вход по тренду, trailing stop
+- REVERSAL: exhaustion delta + absorption + VWAP band extreme → контр-тренд, тайтовый TP
+- BREAKOUT: squeeze regime + volume surge + EMA alignment → вход на пробое
 
-## Приоритет данных для скальпинга
+УПРАВЛЕНИЕ ПОЗИЦИЯМИ:
+- Позиция в плюсе > 0.3% → передвинуть SL в безубыток (update_sl)
+- Позиция во флэте > 45 мин → закрыть (close)
+- Позиция в минусе > 45 мин → закрыть
+- Позиция старше 90 мин → закрыть
+- Если regime сменился на противоположный → закрыть
 
-### 1. Scalp Signal (СМОТРИ ПЕРВЫМ)
-- scalp_signal.verdict: strong_buy/buy/neutral/sell/strong_sell
-- scalp_signal.quality: good/risky/poor — если poor, НЕ ВХОДИ
-- Это агрегация order flow + momentum + price action + spread
-
-### 2. Order Flow Imbalance
-- imbalance > 0.3 = сильное давление покупателей → лонг
-- imbalance < -0.3 = сильное давление продавцов → шорт
-- balanced = нет преимущества, жди
-
-### 3. Micro Momentum
-- strong_bullish_burst + volume_factor > 1.2 = немедленный лонг
-- strong_bearish_burst + volume_factor > 1.2 = немедленный шорт
-- consolidation = жди пробоя
-
-### 4. Быстрые EMA (3/5/8/13/21)
-- EMA3 > EMA8 > EMA21 = scalp_trend bullish → лонг
-- EMA3 < EMA8 < EMA21 = scalp_trend bearish → шорт
-- mixed = нет чёткого тренда, осторожно
-
-### 5. Быстрый MACD (5, 13, 4)
-- macd_fast_crossover = bullish → сигнал на лонг
-- macd_fast_crossover = bearish → сигнал на шорт
-- Гистограмма растёт = моментум усиливается
-
-### 6. RSI-3 (ультра-быстрый)
-- RSI-3 < 15 = экстремальная перепроданность → лонг
-- RSI-3 > 85 = экстремальная перекупленность → шорт
-- RSI-3 20-80 = нормальная зона
-
-### 7. Volatility Regime
-- expanding = высокая волатильность → тайтовые стопы, меньше размер
-- contracting = сжатие → готовься к пробою
-- normal = стандартные параметры
-
-### 8. Spread Estimation
-- wide_spread = плохая ликвидность → НЕ ВХОДИ (плохие заполнения)
-- tight_spread = хорошие условия для скальпинга
-
-### 9. Price Action (микро-паттерны)
-- bullish_pin_bar на поддержке → лонг
-- bearish_pin_bar на сопротивлении → шорт
-- bullish_engulfing / bearish_engulfing → сильные сигналы
-- inside_bar → готовься к пробою
-
-### 10. Количественный анализ
-- _regime_consensus: trending → торгуй по тренду, mean_reverting → от экстремумов
-- Z-score |Z| > 2.0 → возврат к среднему
-- Kalman: цена далеко от kalman_price → возможен откат
-- Hurst > 0.6 → моментум работает, < 0.4 → mean reversion
-
-### 11. Мульти-таймфрейм для скальпинга
-- 15m определяет НАПРАВЛЕНИЕ (не торгуй против 15m тренда)
-- 5m подтверждает сетап
-- 1m даёт точку входа
-- Минимум 2 из 3 таймфреймов должны совпадать
-
-### 12. Ончейн (контекст)
-- Экстремальный фандинг (>0.05%) → осторожно с лонгами
-- Рост OI + рост цены → сильный тренд, скальпируй по нему
-- Ликвидации extreme → НЕ ВХОДИ, жди стабилизации
-
-### 13. Управление открытыми позициями
-- Позиция старше 90 минут → рекомендуй ЗАКРЫТЬ (close)
-- Позиция в прибыли > 0.5% → подтяни стоп (update_sl)
-- Позиция в убытке и возраст > 60 мин → закрой, не жди
-
-## Правила риска (НИКОГДА НЕ НАРУШАЙ)
+ПРАВИЛА РИСКА:
 - Макс 8% портфеля на сделку
-- Макс 5 позиций одновременно
-- Всегда стоп-лосс (1.5x ATR или 0.5% фиксированный)
+- Макс 5 позиций
 - Risk/Reward минимум 1.5:1
-- Дневной убыток > 5% → СТОП торговли
-- RSI > 85 = НЕ лонг. RSI < 15 = НЕ шорт
-- wide_spread → НЕ ВХОДИ
-- Не гонись за движением > 1% за последние 5 минут
+- Не гонись за движением > 1% за 5 мин
 - При неясных сигналах → HOLD
 
-## Формат вывода
-Отвечай ТОЛЬКО валидным JSON:
+Формат: ТОЛЬКО валидный JSON.
 {
-  "decisions": [
-    {
-      "symbol": "BTC/USDT",
-      "action": "open_long" | "open_short" | "close" | "update_sl" | "hold" | "trigger_long" | "trigger_short",
-      "confidence": 0.0-1.0,
-      "reason": "Краткое обоснование на русском с конкретными числами индикаторов",
-      "params": {
-        "trigger_price": null,
-        "new_stop_loss": null
-      }
-    }
-  ],
-  "market_outlook": "Краткая оценка рынка на русском",
-  "risk_level": "low" | "medium" | "high"
+  "decisions": [{"symbol":"...","action":"open_long|open_short|close|update_sl|hold","confidence":0.0-1.0,"reason":"конкретные числа","params":{"trigger_price":null,"new_stop_loss":null}}],
+  "market_outlook": "краткая оценка на русском",
+  "risk_level": "low|medium|high"
 }
-
-Типы ордеров:
-- open_long/open_short — вход по рынку СЕЙЧАС
-- trigger_long/trigger_short — вход когда цена дойдёт до trigger_price
-- close — закрыть позицию
-- update_sl — подтянуть стоп-лосс
-- hold — ничего не делать
-
 Рекомендуй действия (не hold) только с confidence >= 0.6.
-Указывай конкретные числа: "RSI-3=12, EMA3>EMA8, order flow +0.35, spread tight".
 """
 
 
@@ -242,29 +168,28 @@ class TradingBrain:
         time_context_data: dict | None = None,
         trade_history_data: dict | None = None,
         scalping_data: dict | None = None,
+        # NEW: pre-aggregated signals from SignalAggregator
+        aggregated_signals: dict | None = None,
+        regime_data: dict | None = None,
+        tape_data: dict | None = None,
+        vwap_data: dict | None = None,
+        delta_data: dict | None = None,
+        drawdown_status: dict | None = None,
     ) -> dict:
-        """Send all data to Claude and get trading decisions."""
+        """Send aggregated data to Claude and get trading decisions."""
 
         user_message = self._build_prompt(
-            technical_data, market_context, portfolio, balance,
-            onchain_data, pattern_data, social_data, correlation_data,
-            quant_data, liquidation_data, cross_corr_data,
-            time_context_data, trade_history_data, scalping_data,
+            technical_data, portfolio, balance,
+            onchain_data, scalping_data,
+            aggregated_signals, regime_data, tape_data,
+            vwap_data, delta_data,
+            trade_history_data, time_context_data,
+            drawdown_status,
         )
 
         prompt_chars = len(SYSTEM_PROMPT) + len(user_message)
         prompt_tokens_est = prompt_chars // 3
-        logger.info(f"Размер промпта: ~{prompt_chars:,} символов (~{prompt_tokens_est:,} токенов)")
-
-        logger.info("=" * 80)
-        logger.info("ТЕКСТ ПРОМПТА, ОТПРАВЛЯЕМЫЙ В CLAUDE:")
-        logger.info("=" * 80)
-        logger.info(f"[SYSTEM PROMPT] ({len(SYSTEM_PROMPT)} символов)")
-        logger.info(SYSTEM_PROMPT)
-        logger.info("-" * 80)
-        logger.info(f"[USER MESSAGE] ({len(user_message)} символов)")
-        logger.info(user_message)
-        logger.info("=" * 80)
+        logger.info(f"Prompt size: ~{prompt_chars:,} chars (~{prompt_tokens_est:,} tokens)")
 
         try:
             response = self.client.messages.create(
@@ -276,7 +201,7 @@ class TradingBrain:
             )
 
             usage = response.usage
-            logger.info(f"Использовано токенов: вход={usage.input_tokens:,}, выход={usage.output_tokens:,}")
+            logger.info(f"Tokens: in={usage.input_tokens:,}, out={usage.output_tokens:,}")
 
             raw_text = response.content[0].text.strip()
 
@@ -291,142 +216,121 @@ class TradingBrain:
             return decision
 
         except json.JSONDecodeError as e:
-            logger.warning(f"Ошибка парсинга JSON-ответа Claude: {e}")
+            logger.warning(f"JSON parse error: {e}")
             repaired = _repair_truncated_json(raw_text)
             if repaired:
                 self._log_decision(repaired)
                 return repaired
-            logger.error(f"Не удалось восстановить JSON. Сырой ответ: {raw_text[:500]}...")
-            return {"decisions": [], "market_outlook": "Ошибка парсинга ответа", "risk_level": "high"}
+            logger.error(f"Cannot repair JSON. Raw: {raw_text[:500]}...")
+            return {"decisions": [], "market_outlook": "Ошибка парсинга", "risk_level": "high"}
 
         except Exception as e:
-            logger.error(f"Ошибка вызова Claude API: {e}")
-            return {"decisions": [], "market_outlook": f"Ошибка API: {e}", "risk_level": "high"}
+            logger.error(f"Claude API error: {e}")
+            return {"decisions": [], "market_outlook": f"API error: {e}", "risk_level": "high"}
 
     def _build_prompt(
         self,
-        technical_data: dict[str, dict],
-        market_context: dict,
+        technical_data: dict,
         portfolio: dict,
         balance: float,
-        onchain_data: dict | None = None,
-        pattern_data: dict | None = None,
-        social_data: dict | None = None,
-        correlation_data: dict | None = None,
-        quant_data: dict | None = None,
-        liquidation_data: dict | None = None,
-        cross_corr_data: dict | None = None,
-        time_context_data: dict | None = None,
-        trade_history_data: dict | None = None,
-        scalping_data: dict | None = None,
+        onchain_data: dict | None,
+        scalping_data: dict | None,
+        aggregated_signals: dict | None,
+        regime_data: dict | None,
+        tape_data: dict | None,
+        vwap_data: dict | None,
+        delta_data: dict | None,
+        trade_history_data: dict | None,
+        time_context_data: dict | None,
+        drawdown_status: dict | None,
     ) -> str:
-        """Build the analysis prompt with all market data."""
+        """Build optimized prompt — aggregated signals + context, NOT raw data."""
 
-        prompt = f"""## Current Time
-{datetime.now(timezone.utc).isoformat()} UTC
-
-## Account Balance
-USDT Available: {balance:.2f}
-
-## Portfolio State
-{_compact_json(portfolio, indent=1)}
-
-## Technical Analysis (Multi-Timeframe: 1m, 5m, 15m)
+        prompt = f"""## Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}
+## Balance: {balance:.2f} USDT
+## Portfolio: {_compact_json(portfolio)}
 """
-        for symbol, timeframes in technical_data.items():
-            prompt += f"\n### {symbol}\n"
-            for tf, data in timeframes.items():
-                prompt += f"**{tf}:** {_compact_json(data)}\n"
 
+        # Aggregated signals (Tier 1-2 pre-computed) — PRIMARY DATA
+        if aggregated_signals:
+            prompt += "\n## Signal Aggregation (per symbol)\n"
+            for symbol, sig in aggregated_signals.items():
+                prompt += f"**{symbol}**: verdict={sig.get('verdict')}, confidence={sig.get('confidence')}, "
+                prompt += f"score={sig.get('weighted_score')}, tier1_conflict={sig.get('tier1_conflict')}\n"
+                for_reasons = sig.get('top_reasons_for', [])
+                against_reasons = sig.get('top_reasons_against', [])
+                if for_reasons:
+                    prompt += f"  FOR: {'; '.join(for_reasons[:3])}\n"
+                if against_reasons:
+                    prompt += f"  AGAINST: {'; '.join(against_reasons[:3])}\n"
+
+        # Regime per symbol
+        if regime_data:
+            prompt += "\n## Market Regime\n"
+            for symbol, regime in regime_data.items():
+                prompt += f"**{symbol}**: regime={regime.get('regime')}, strategy={regime.get('strategy')}, "
+                prompt += f"ADX={regime.get('metrics', {}).get('adx', '?')}, ER={regime.get('metrics', {}).get('efficiency_ratio', '?')}\n"
+
+        # Tier 1-2 raw data (only scalping microstructure)
         if scalping_data:
-            prompt += f"\n## Scalping Microstructure (order flow, micro-momentum, spread)\n{_compact_json(scalping_data)}\n"
+            prompt += f"\n## Scalping Microstructure\n{_compact_json(scalping_data)}\n"
 
-        if pattern_data:
-            prompt += f"\n## Candlestick Patterns, Fibonacci & Divergences\n{_compact_json(pattern_data)}\n"
+        # Tape reading
+        if tape_data:
+            prompt += f"\n## Tape Reading\n"
+            for symbol, tape in tape_data.items():
+                verdict = tape.get("tape_verdict", {})
+                prompt += f"**{symbol}**: tape={verdict.get('signal', 'n/a')}, "
+                prompt += f"intensity={tape.get('trade_intensity', {}).get('signal', '?')}, "
+                prompt += f"flow={tape.get('aggressive_flow', {}).get('signal', '?')}\n"
 
+        # VWAP bands
+        if vwap_data:
+            prompt += f"\n## VWAP Bands\n"
+            for symbol, vwap in vwap_data.items():
+                prompt += f"**{symbol}**: deviation={vwap.get('deviation_sigma', 0):.2f}σ, signal={vwap.get('signal', '?')}\n"
+
+        # Delta divergence
+        if delta_data:
+            prompt += f"\n## Delta Analysis\n"
+            for symbol, delta in delta_data.items():
+                verdict = delta.get("delta_verdict", {})
+                prompt += f"**{symbol}**: delta={verdict.get('signal', 'n/a')}, stacked={delta.get('stacked_delta', {}).get('signal', '?')}\n"
+
+        # Tier 3 context (one line each)
         if onchain_data:
-            prompt += f"\n## On-Chain & Derivatives Data\n{_compact_json(onchain_data)}\n"
-
-        prompt += f"\n## News & Fundamental Context\n{_compact_json(market_context, indent=1)}\n"
-
-        if social_data:
-            prompt += f"\n## Social Trends & Sector Rotation\n{_compact_json(social_data, indent=1)}\n"
-
-        if correlation_data:
-            prompt += f"\n## Market Correlations\n{_compact_json(correlation_data, indent=1)}\n"
-
-        if quant_data:
-            prompt += f"\n## Quantitative Analysis (Hurst, Kalman, FFT, VaR, Z-Score)\n{_compact_json(quant_data)}\n"
-
-        if liquidation_data:
-            prompt += f"\n## Liquidation Data\n{_compact_json(liquidation_data)}\n"
-
-        if cross_corr_data:
-            prompt += f"\n## Cross-Symbol Correlation\n{_compact_json(cross_corr_data, indent=1)}\n"
+            prompt += "\n## On-Chain Context (Tier 3)\n"
+            for symbol, data in onchain_data.items():
+                if symbol == "_market_wide":
+                    continue
+                funding = data.get("funding_rate", {})
+                prompt += f"{symbol}: funding={funding.get('sentiment', '?')}, "
+                prompt += f"OI={data.get('open_interest', {}).get('open_interest_value_usd', 0):.0f}\n"
 
         if time_context_data:
-            prompt += f"\n## Time & Session Context\n{_compact_json(time_context_data, indent=1)}\n"
+            session = time_context_data.get("session", {})
+            prompt += f"\n## Session: {', '.join(session.get('active', []))} | volatility={session.get('volatility_expected', '?')}\n"
 
+        # Drawdown status
+        if drawdown_status:
+            prompt += f"\n## Risk Status: daily_pnl={drawdown_status.get('daily_pnl_pct', 0):+.1f}%, "
+            prompt += f"consecutive_losses={drawdown_status.get('consecutive_losses', 0)}, "
+            prompt += f"min_confidence={drawdown_status.get('min_confidence', 0.6)}\n"
+
+        # Trade history feedback (last 5 trades)
         if trade_history_data and trade_history_data.get("total_trades", 0) > 0:
-            prompt += f"\n## Trade History\n{_compact_json(trade_history_data, indent=1)}\n"
+            prompt += "\n## Recent Trades (learn from these)\n"
+            recent = trade_history_data.get("recent_trades", [])[-5:]
+            for t in recent:
+                prompt += f"  {t.get('symbol')} {t.get('side')} {t.get('pnl_pct', 0):+.1f}% ({t.get('result')})\n"
+            prompt += f"Win rate: {trade_history_data.get('win_rate_pct', 0):.0f}%, "
+            prompt += f"PF: {trade_history_data.get('profit_factor', 0):.1f}\n"
+            worst = trade_history_data.get("worst_symbols", [])
+            if worst:
+                prompt += f"Worst symbols: {', '.join(w['symbol'] for w in worst)} — avoid these\n"
 
-        missing = self._detect_missing_data(
-            onchain_data, market_context, social_data, correlation_data, quant_data,
-        )
-        if missing:
-            prompt += "\n## Недоступные источники данных\n"
-            prompt += "Принимай решения БЕЗ этих данных:\n"
-            for source in missing:
-                prompt += f"- {source}\n"
-
-        prompt += """
-## Instructions (SCALPING MODE)
-Analyze data for SHORT-TERM scalping (max 2 hours):
-1. CHECK scalp_signal verdict FIRST
-2. CHECK regime consensus (trending/mean-reverting)
-3. Verify timeframe alignment (1m + 5m + 15m)
-4. Look for fast EMA crosses (3/8/21) and fast MACD
-5. Use RSI-3 for extremes
-6. Check order flow and micro momentum
-7. Spread wide = DO NOT ENTER
-8. Positions older than 90 min = recommend CLOSE
-9. Cite specific indicator values in reason
-
-Return your decisions as JSON.
-"""
+        prompt += "\nReturn trading decisions as JSON. If Tier 1 signals conflict — HOLD.\n"
         return prompt
-
-    @staticmethod
-    def _detect_missing_data(
-        onchain_data: dict | None,
-        market_context: dict | None,
-        social_data: dict | None,
-        correlation_data: dict | None,
-        quant_data: dict | None,
-    ) -> list[str]:
-        missing = []
-        if not onchain_data:
-            missing.append("On-chain данные")
-        else:
-            market_wide = onchain_data.get("_market_wide", {})
-            if not market_wide.get("whale_alerts"):
-                missing.append("Whale Alerts")
-            if market_wide.get("exchange_netflow", {}).get("signal") == "unknown":
-                missing.append("Exchange Netflow")
-        if not market_context:
-            missing.append("Новости")
-        else:
-            if not market_context.get("crypto_news"):
-                missing.append("Крипто-новости")
-            if not market_context.get("trending_coins"):
-                missing.append("Трендовые монеты")
-        if not social_data:
-            missing.append("Социальные данные")
-        if not correlation_data:
-            missing.append("Рыночные корреляции")
-        if not quant_data:
-            missing.append("Количественный анализ")
-        return missing
 
     def _log_decision(self, decision: dict):
         entry = {
@@ -436,9 +340,9 @@ Return your decisions as JSON.
             "risk": decision.get("risk_level", ""),
         }
         self.trade_history.append(entry)
-        logger.info(f"Решение ИИ: прогноз={entry['outlook']}, риск={entry['risk']}")
+        logger.info(f"AI decision: outlook={entry['outlook']}, risk={entry['risk']}")
         for d in entry["decisions"]:
-            logger.info(f"  -> {d['symbol']}: {d['action']} (уверенность={d.get('confidence', 0)})")
+            logger.info(f"  -> {d['symbol']}: {d['action']} (confidence={d.get('confidence', 0)})")
 
     def get_trade_history(self) -> list[dict]:
         return self.trade_history[-50:]

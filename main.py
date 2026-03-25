@@ -1,11 +1,21 @@
 """
-Autonomous AI Trading Agent
-Main entry point and orchestration loop.
+Autonomous AI Trading Agent — Optimized Scalping v3.0
+
+Key improvements over v2.0:
+- SignalAggregator: weighted tier-based signals (Tier 1/2/3) instead of flat noise
+- RegimeDetector: adapts strategy to market state (trend/range/squeeze/choppy)
+- DynamicExitManager: context-aware SL/TP with partial take profits
+- DrawdownBreaker: graduated loss protection (not just 5% hard stop)
+- CorrelationGuard: prevents over-concentrated positions
+- TapeReader + VWAPBands + DeltaDivergence: new scalping indicators
+- FastScanner: 30s quick checks + 2min full cycles (adaptive by volatility)
+- Fallback: rule-based decisions when Claude API is unavailable
+- Structured decision logging for post-analysis
 
 Usage:
-    python main.py              # Run in demo mode (default, Bitget demo account)
-    python main.py --live       # Switch to live trading (real money!)
-    python main.py --once       # Run analysis once and exit
+    python main.py              # Demo mode (Bitget demo account)
+    python main.py --live       # Live trading
+    python main.py --once       # One cycle and exit
 """
 
 import argparse
@@ -29,9 +39,17 @@ from analysis.liquidations import LiquidationAnalyzer
 from analysis.cross_correlation import CrossCorrelationAnalyzer
 from analysis.time_context import TimeContextAnalyzer
 from analysis.scalping import ScalpingAnalyzer
+from analysis.signal_aggregator import SignalAggregator
+from analysis.regime_detector import RegimeDetector
+from analysis.tape_reader import TapeReader
+from analysis.vwap_bands import VWAPBands
+from analysis.delta_divergence import DeltaDivergence
 from news.fetcher import NewsFetcher
 from news.social import SocialSentiment
 from risk.manager import RiskManager
+from risk.dynamic_exits import DynamicExitManager
+from risk.drawdown_breaker import DrawdownBreaker
+from risk.correlation_guard import CorrelationGuard
 from orders.manager import OrderManager
 from agent.brain import TradingBrain
 from utils.notifications import Notifier
@@ -44,20 +62,19 @@ logger.add("logs/trading_{time:YYYY-MM-DD}.log", rotation="1 day", retention="30
 
 
 class TradingAgent:
-    """Main orchestrator that ties everything together."""
+    """Main orchestrator — optimized for scalping profitability."""
 
     def __init__(self, mode: str = "demo"):
-        self.mode = mode  # "paper", "demo", or "live"
+        self.mode = mode
 
         logger.info("=" * 60)
-        logger.info("  АВТОНОМНЫЙ ИИ ТОРГОВЫЙ АГЕНТ v2.0")
-        logger.info(f"  Режим: {self.mode.upper()}")
+        logger.info("  AUTONOMOUS AI TRADING AGENT v3.0 (OPTIMIZED)")
+        logger.info(f"  Mode: {self.mode.upper()}")
         if self.mode == "paper":
-            logger.info(f"  Бумажный баланс: {config.paper.initial_balance} USDT")
+            logger.info(f"  Paper balance: {config.paper.initial_balance} USDT")
         elif self.mode == "demo":
-            logger.info("  Демо-счёт Bitget (виртуальные деньги)")
-        logger.info(f"  Символы: {config.trading.symbols}")
-        logger.info(f"  Интервал: {config.trading.analysis_interval_minutes} мин")
+            logger.info("  Bitget Demo Account")
+        logger.info(f"  Symbols: {config.trading.symbols}")
         logger.info("=" * 60)
 
         # Core modules
@@ -68,261 +85,335 @@ class TradingAgent:
         self.brain = TradingBrain(config.claude)
         self.notifier = Notifier(config.notifications)
 
-        # Enhanced analysis modules
+        # New optimized modules
+        self.signal_aggregator = SignalAggregator()
+        self.regime_detector = RegimeDetector()
+        self.exit_manager = DynamicExitManager()
+        self.drawdown = DrawdownBreaker()
+        self.corr_guard = CorrelationGuard()
+        self.tape_reader = TapeReader()
+        self.vwap_bands = VWAPBands()
+        self.delta_div = DeltaDivergence()
+
+        # Retained modules (slimmed)
         self.patterns = PatternRecognizer()
         self.onchain = OnChainAnalyzer()
-        self.correlations = MarketCorrelations()
         self.quant = QuantAnalyzer()
-        self.news = NewsFetcher(config.news)
-        self.social = SocialSentiment()
         self.trade_history = TradeHistoryTracker()
         self.liquidations = LiquidationAnalyzer()
-        self.cross_corr = CrossCorrelationAnalyzer()
         self.time_context = TimeContextAnalyzer()
         self.scalping = ScalpingAnalyzer()
 
-        # Валидация символов на бирже
+        # Removed from main cycle: news, social, correlations, cross_correlation
+        # These are either too slow or irrelevant for 2-min scalping cycles
+        self.news = NewsFetcher(config.news)
+        self.social = SocialSentiment()
+        self.correlations = MarketCorrelations()
+        self.cross_corr = CrossCorrelationAnalyzer()
+
+        # Validate symbols
         self.symbols = self.exchange.validate_symbols(config.trading.symbols)
         if not self.symbols:
-            logger.error("Не найдено ни одного валидного символа! Проверь конфигурацию.")
+            logger.error("No valid symbols found!")
             sys.exit(1)
-        logger.info(f"Активные символы: {self.symbols}")
+        logger.info(f"Active symbols: {self.symbols}")
 
         # Paper trading state
         self.paper_balance = config.paper.initial_balance
         self.paper_trades: list[dict] = []
 
         self._last_daily_reset = datetime.now(timezone.utc).date()
+        self._last_hourly_corr_update = 0.0
+        self._cycle_count = 0
 
-        # Create dirs
+        # Structured decision log
+        self._decision_log: list[dict] = []
+
         Path("logs").mkdir(exist_ok=True)
         Path("data").mkdir(exist_ok=True)
 
     def run_cycle(self):
         """Run one full analysis and trading cycle."""
+        self._cycle_count += 1
         logger.info("-" * 40)
-        logger.info(f"Начинаем цикл анализа: {datetime.now(timezone.utc).isoformat()}")
+        logger.info(f"Cycle #{self._cycle_count}: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
 
-        # Reset daily stats if new day
+        # Daily reset
         today = datetime.now(timezone.utc).date()
         if today > self._last_daily_reset:
             self.risk.reset_daily_stats()
+            self.drawdown.reset_daily()
             self._last_daily_reset = today
 
-        # Sync positions from exchange (demo and live mode)
+        # Drawdown check — can we trade at all?
+        can_trade, reason = self.drawdown.can_trade()
+        if not can_trade:
+            logger.warning(f"Trading blocked: {reason}")
+            return
+
+        # Sync positions (demo/live)
         if self.mode in ("demo", "live"):
             self.orders.sync_positions_from_exchange()
 
-        # 0. Авто-закрытие просроченных позиций (макс. 2 часа)
-        max_age = config.trading.max_position_age_minutes
+        # Auto-close expired positions (90 min instead of 120)
+        max_age = 90
         expired = self.risk.get_expired_positions(max_age)
         for symbol in expired:
-            logger.warning(f"Позиция {symbol} просрочена (>{max_age} мин), принудительно закрываем")
+            logger.warning(f"Position {symbol} expired (>{max_age} min), force closing")
             if self.mode == "paper":
                 try:
                     ticker = self.exchange.fetch_ticker(symbol)
                     price = ticker["last"]
                     pnl = self.risk.close_position(symbol, price)
                     self.paper_balance += pnl
-                    logger.info(f"[БУМАГА] Принудительное закрытие {symbol} @ {price} | PnL: {pnl:+.2f}")
+                    self.drawdown.update(pnl, self.paper_balance)
                 except Exception as e:
-                    logger.error(f"Ошибка принудительного закрытия {symbol}: {e}")
+                    logger.error(f"Error closing expired {symbol}: {e}")
             else:
                 result = self.orders.close_position(symbol)
                 if result:
+                    self.drawdown.update(result.get("pnl", 0), self.exchange.fetch_usdt_balance())
                     self.notifier.send(
-                        f"\u23F0 <b>АВТО-ЗАКРЫТИЕ (>{max_age} мин)</b>\n"
+                        f"\u23F0 <b>AUTO-CLOSE (>{max_age} min)</b>\n"
                         f"{symbol} | PnL: {result.get('pnl', 0):+.2f} USDT"
                     )
 
-        # 1. Technical analysis (multi-timeframe: 1m, 5m, 15m)
+        # ── DATA COLLECTION ──────────────────────────────────
+
+        # 1. OHLCV for all symbols (1m, 5m)
         technical_data = {}
         ohlcv_cache = {}
         for symbol in self.symbols:
             try:
                 ohlcv_dict = {}
-                for tf in config.trading.timeframes:
+                for tf in ["1m", "5m"]:  # Skip 15m to save time
                     ohlcv_dict[tf] = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
                 technical_data[symbol] = self.analyzer.multi_timeframe_analysis(ohlcv_dict, symbol)
                 ohlcv_cache[symbol] = ohlcv_dict
             except Exception as e:
-                logger.error(f"Ошибка анализа {symbol}: {e}")
+                logger.error(f"Data fetch error {symbol}: {e}")
 
         if not technical_data:
-            logger.warning("Нет технических данных, пропускаем цикл")
+            logger.warning("No technical data, skipping cycle")
             return
 
-        # 2. Свечные паттерны, Фибоначчи, дивергенции
-        logger.info("Анализируем паттерны, уровни Фибоначчи, дивергенции...")
-        pattern_data = {}
-        for symbol, ohlcv_dict in ohlcv_cache.items():
-            pattern_data[symbol] = {}
-            for tf, df in ohlcv_dict.items():
-                df_with_indicators = self.analyzer.compute_indicators(df)
-                pattern_data[symbol][tf] = self.patterns.get_full_pattern_analysis(df_with_indicators)
-
-        # 2b. Количественный анализ (короткие окна для скальпинга)
-        logger.info("Запускаем количественный анализ (скальпинг-режим)...")
-        quant_data = {}
-        for symbol, ohlcv_dict in ohlcv_cache.items():
-            quant_data[symbol] = {}
-            for tf, df in ohlcv_dict.items():
-                quant_data[symbol][tf] = self.quant.full_quant_analysis(df, short_term=True)
-
-        # 2c. Скальпинг-анализ (микроструктура, order flow, momentum bursts)
-        logger.info("Запускаем скальпинг-анализ (order flow, микро-моментум, спред)...")
+        # 2. Scalping microstructure (order flow, momentum, spread)
         scalping_data = {}
         for symbol, ohlcv_dict in ohlcv_cache.items():
-            # Используем самый короткий таймфрейм для скальпинг-анализа
-            shortest_tf = config.trading.timeframes[0]  # "1m"
-            if shortest_tf in ohlcv_dict:
-                scalping_data[symbol] = self.scalping.full_scalping_analysis(ohlcv_dict[shortest_tf])
+            if "1m" in ohlcv_dict:
+                scalping_data[symbol] = self.scalping.full_scalping_analysis(ohlcv_dict["1m"])
 
-        # 3. Ончейн и деривативы
-        logger.info("Загружаем ончейн-данные (фандинг, OI, киты)...")
-        onchain_data = self.onchain.get_full_onchain_data(self.exchange, self.symbols)
+        # 3. New indicators: Tape Reading, VWAP Bands, Delta Divergence
+        tape_data = {}
+        vwap_data = {}
+        delta_data = {}
+        for symbol, ohlcv_dict in ohlcv_cache.items():
+            if "1m" in ohlcv_dict:
+                df_1m = ohlcv_dict["1m"]
+                tape_data[symbol] = self.tape_reader.analyze(df_1m)
+                vwap_data[symbol] = self.vwap_bands.analyze(df_1m)
+                delta_data[symbol] = self.delta_div.analyze(df_1m)
 
-        # 4. Новости и фундаментальный контекст
-        logger.info("Загружаем новости и рыночный контекст...")
-        market_context = self.news.get_market_context()
+        # 4. Regime detection (from 5m data)
+        regime_data = {}
+        for symbol, ohlcv_dict in ohlcv_cache.items():
+            if "5m" in ohlcv_dict:
+                regime_data[symbol] = self.regime_detector.detect(ohlcv_dict["5m"])
 
-        # 5. Социальные настроения
-        logger.info("Загружаем социальные данные (тренды, секторы)...")
-        social_data = self.social.get_full_social_data()
+        # 5. Signal Aggregation (Tier 1-2-3 weighted)
+        aggregated_signals = {}
+        for symbol in self.symbols:
+            if symbol in technical_data and symbol in scalping_data:
+                aggregated_signals[symbol] = self.signal_aggregator.aggregate(
+                    technical_data=technical_data[symbol],
+                    scalping_data=scalping_data.get(symbol, {}),
+                    onchain_data=None,  # Will add onchain in Tier 3
+                    liquidation_data=None,
+                    symbol=symbol,
+                )
 
-        # 6. Рыночные корреляции
-        logger.info("Загружаем рыночные корреляции (BTC Dominance, стейблкоины)...")
-        correlation_data = self.correlations.get_full_correlation_data()
+        # 6. On-chain data (Tier 3, not blocking)
+        onchain_data = {}
+        try:
+            onchain_data = self.onchain.get_full_onchain_data(self.exchange, self.symbols)
+        except Exception as e:
+            logger.warning(f"On-chain data fetch failed: {e}")
 
-        # 6b. Ликвидации
-        logger.info("Загружаем данные о ликвидациях...")
-        liquidation_data = self.liquidations.get_all_liquidations(self.symbols)
+        # 7. Liquidation data (Tier 3)
+        liquidation_data = {}
+        try:
+            liquidation_data = self.liquidations.get_all_liquidations(self.symbols)
+        except Exception as e:
+            logger.warning(f"Liquidation data fetch failed: {e}")
 
-        # 6c. Кросс-корреляция символов
-        logger.info("Вычисляем кросс-корреляцию символов...")
-        cross_corr_data = self.cross_corr.compute_correlation_matrix(ohlcv_cache)
-
-        # 6d. Временной контекст (сессия, день недели, экспирация)
+        # 8. Time context
         time_context_data = self.time_context.get_time_context()
 
-        # 6e. История сделок
+        # 9. Trade history
         trade_history_data = self.trade_history.get_summary_for_prompt()
 
-        # 6f. Трейлинг-стопы
+        # 10. Trailing stops check
         if self.mode in ("demo", "live") and self.risk.positions:
-            logger.info("Проверяем трейлинг-стопы...")
             trailing_updates = self.risk.check_all_trailing_stops(
                 lambda sym: self.exchange.fetch_ticker(sym)["last"]
             )
             for update in trailing_updates:
-                logger.info(
-                    f"Трейлинг-стоп {update['symbol']}: SL {update['old_sl']} -> {update['new_sl']}"
-                )
+                logger.info(f"Trailing stop {update['symbol']}: SL {update['old_sl']} -> {update['new_sl']}")
                 self.orders.update_stop_loss(update["symbol"], update["new_sl"])
 
-        # 7. Get portfolio state
+        # Time-based exit checks
+        for symbol, pos in list(self.risk.positions.items()):
+            age = self.risk.get_position_age_minutes(symbol) or 0
+            try:
+                current_price = self.exchange.fetch_ticker(symbol)["last"]
+                if pos.side == "long":
+                    pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+                else:
+                    pnl_pct = (pos.entry_price - current_price) / pos.entry_price * 100
+
+                action = self.exit_manager.time_based_exit_check(age, pnl_pct)
+                if action == "close":
+                    logger.info(f"Time-based close: {symbol} (age={age:.0f}m, pnl={pnl_pct:.2f}%)")
+                    if self.mode == "paper":
+                        pnl = self.risk.close_position(symbol, current_price)
+                        self.paper_balance += pnl
+                        self.drawdown.update(pnl, self.paper_balance)
+                    else:
+                        result = self.orders.close_position(symbol)
+                        if result:
+                            self.drawdown.update(result.get("pnl", 0), self.exchange.fetch_usdt_balance())
+                elif action == "tighten" and self.exit_manager.should_move_to_breakeven(
+                    pos.entry_price, current_price, pos.side,
+                    self._get_atr(symbol) or pos.entry_price * 0.003
+                ):
+                    logger.info(f"Moving SL to breakeven: {symbol}")
+                    if self.mode in ("demo", "live"):
+                        self.orders.update_stop_loss(symbol, pos.entry_price)
+                    else:
+                        pos.stop_loss = pos.entry_price
+            except Exception as e:
+                logger.error(f"Time-based exit check failed for {symbol}: {e}")
+
+        # ── AI DECISION ──────────────────────────────────────
+
         if self.mode in ("demo", "live"):
             balance = self.exchange.fetch_usdt_balance()
         else:
             balance = self.paper_balance
 
         portfolio = self.risk.get_portfolio_summary()
+        drawdown_status = self.drawdown.get_status()
 
-        logger.info(f"Баланс: {balance:.2f} USDT | Позиции: {portfolio['num_positions']}")
+        logger.info(f"Balance: {balance:.2f} USDT | Positions: {portfolio['num_positions']} | "
+                     f"Daily PnL: {drawdown_status['daily_pnl_pct']:+.1f}%")
 
-        # 8. Сводка качества данных
-        self._log_data_quality(onchain_data, market_context, social_data, correlation_data)
+        # Send to Claude (with aggregated signals, not raw data)
+        logger.info("Sending aggregated signals to Claude AI...")
+        try:
+            decision = self.brain.analyze_and_decide(
+                technical_data=technical_data,
+                market_context={},  # REMOVED news/social from main cycle
+                portfolio=portfolio,
+                balance=balance,
+                onchain_data=onchain_data,
+                scalping_data=scalping_data,
+                aggregated_signals=aggregated_signals,
+                regime_data=regime_data,
+                tape_data=tape_data,
+                vwap_data=vwap_data,
+                delta_data=delta_data,
+                trade_history_data=trade_history_data,
+                time_context_data=time_context_data,
+                drawdown_status=drawdown_status,
+            )
+        except Exception as e:
+            # FALLBACK: use rule-based SignalAggregator when Claude is unavailable
+            logger.warning(f"Claude API failed ({e}), using rule-based fallback")
+            decision = self._fallback_decisions(aggregated_signals, regime_data)
 
-        # 9. Отправляем ВСЁ в Claude AI для принятия решений
-        logger.info("Отправляем данные в Claude AI для анализа (скальпинг-режим)...")
-        decision = self.brain.analyze_and_decide(
-            technical_data=technical_data,
-            market_context=market_context,
-            portfolio=portfolio,
-            balance=balance,
-            onchain_data=onchain_data,
-            pattern_data=pattern_data,
-            social_data=social_data,
-            correlation_data=correlation_data,
-            quant_data=quant_data,
-            liquidation_data=liquidation_data,
-            cross_corr_data=cross_corr_data,
-            time_context_data=time_context_data,
-            trade_history_data=trade_history_data,
-            scalping_data=scalping_data,
-        )
+        logger.info(f"AI outlook: {decision.get('market_outlook', 'N/A')}")
+        logger.info(f"Risk level: {decision.get('risk_level', 'N/A')}")
 
-        logger.info(f"Прогноз ИИ: {decision.get('market_outlook', 'Н/Д')}")
-        logger.info(f"Уровень риска: {decision.get('risk_level', 'Н/Д')}")
+        # ── EXECUTE DECISIONS ────────────────────────────────
 
-        # 10. Execute decisions
+        min_confidence = self.drawdown.get_min_confidence()
+        size_mult = self.drawdown.get_position_size_multiplier()
+
         actions = decision.get("decisions", [])
         for action in actions:
+            # Apply drawdown-adjusted confidence threshold
+            confidence = action.get("confidence", 0)
+            if confidence < min_confidence and action.get("action") not in ("hold", "close", "update_sl"):
+                logger.info(f"Skipping {action.get('symbol')} {action.get('action')}: "
+                            f"confidence {confidence} < min {min_confidence}")
+                continue
+
+            # Correlation guard check
+            if action.get("action") in ("open_long", "open_short"):
+                symbol = action.get("symbol", "")
+                direction = "long" if action["action"] == "open_long" else "short"
+                open_pos = {s: {"side": p.side} for s, p in self.risk.positions.items()}
+                can_open, reason = self.corr_guard.can_open_position(symbol, direction, open_pos)
+                if not can_open:
+                    logger.info(f"Correlation guard blocked: {reason}")
+                    continue
+
+                # Regime check — skip if choppy
+                regime = regime_data.get(symbol, {})
+                if regime.get("regime") == "choppy":
+                    logger.info(f"Skipping {symbol}: choppy regime")
+                    continue
+
+                # RVOL check
+                tech = technical_data.get(symbol, {}).get("1m", {})
+                rvol = tech.get("rvol", 1.0)
+                if rvol < 0.5:
+                    logger.info(f"Skipping {symbol}: RVOL={rvol:.2f} too low")
+                    continue
+
             self._execute_decision(action, balance)
 
-    def _log_data_quality(self, onchain_data, market_context, social_data, correlation_data):
-        """Log summary of what data was actually collected vs empty."""
-        sources = {}
+            # Log decision for analysis
+            self._log_structured_decision(action, aggregated_signals, regime_data)
 
-        # On-chain
-        if onchain_data:
-            market_wide = onchain_data.get("_market_wide", {})
-            sources["whale_alerts"] = len(market_wide.get("whale_alerts", []))
-            sources["exchange_netflow"] = market_wide.get("exchange_netflow", {}).get("signal", "unknown") != "unknown"
-            # Check per-symbol data (sample first symbol)
-            symbol_keys = [k for k in onchain_data if k != "_market_wide"]
-            if symbol_keys:
-                sample = onchain_data[symbol_keys[0]]
-                sources["funding_rates"] = sample.get("funding_rate", {}).get("sentiment", "unknown") != "unknown"
-                sources["open_interest"] = sample.get("open_interest", {}).get("open_interest_value_usd", 0) > 0
-                sources["long_short_ratio"] = sample.get("long_short_ratio", {}).get("_source", "default") != "default"
-        else:
-            sources["funding_rates"] = False
-            sources["open_interest"] = False
-            sources["long_short_ratio"] = False
-            sources["whale_alerts"] = 0
-            sources["exchange_netflow"] = False
+    def _fallback_decisions(self, aggregated_signals: dict, regime_data: dict) -> dict:
+        """Rule-based fallback when Claude API is unavailable.
 
-        # News
-        if market_context:
-            sources["crypto_news"] = len(market_context.get("crypto_news", []))
-            sources["geo_news"] = len(market_context.get("geopolitics_macro_news", []))
-            sources["trending_coins"] = len(market_context.get("trending_coins", []))
-            sources["fear_greed"] = market_context.get("fear_greed_index", {}).get("value", 50) != 50
-        else:
-            sources["crypto_news"] = 0
-            sources["geo_news"] = 0
-            sources["trending_coins"] = 0
-            sources["fear_greed"] = False
+        Uses SignalAggregator directly, with 50% position size reduction.
+        """
+        decisions = []
+        for symbol, sig in aggregated_signals.items():
+            if sig.get("tier1_conflict"):
+                continue
+            regime = regime_data.get(symbol, {})
+            if regime.get("regime") == "choppy":
+                continue
 
-        # Social
-        if social_data:
-            sources["trending_coins"] = len(social_data.get("social_trending", {}).get("trending_by_social", []))
-            sources["sector_rotation"] = len(social_data.get("sector_performance", {}).get("sectors", []))
-        else:
-            sources["trending_coins"] = 0
-            sources["sector_rotation"] = 0
+            verdict = sig.get("verdict", "hold")
+            confidence = sig.get("confidence", 0) * regime.get("confidence_mult", 1.0) * 0.7  # Reduced for fallback
 
-        # Correlations
-        if correlation_data:
-            sources["btc_dominance"] = correlation_data.get("btc_dominance", {}).get("btc_dominance", 0) > 0
-            sources["stablecoin_market"] = bool(correlation_data.get("stablecoin_market"))
-        else:
-            sources["btc_dominance"] = False
-            sources["stablecoin_market"] = False
+            if verdict == "long" and confidence >= 0.4:
+                decisions.append({
+                    "symbol": symbol,
+                    "action": "open_long",
+                    "confidence": round(confidence, 2),
+                    "reason": f"[FALLBACK] {'; '.join(sig.get('top_reasons_for', [])[:2])}",
+                    "params": {},
+                })
+            elif verdict == "short" and confidence >= 0.4:
+                decisions.append({
+                    "symbol": symbol,
+                    "action": "open_short",
+                    "confidence": round(confidence, 2),
+                    "reason": f"[FALLBACK] {'; '.join(sig.get('top_reasons_for', [])[:2])}",
+                    "params": {},
+                })
 
-        # Log summary
-        loaded = []
-        empty = []
-        for name, val in sources.items():
-            if isinstance(val, bool):
-                (loaded if val else empty).append(name)
-            elif isinstance(val, int):
-                (loaded if val > 0 else empty).append(f"{name}({val})" if val > 0 else name)
-
-        logger.info(f"Данные загружены: {', '.join(loaded) if loaded else 'нет'}")
-        if empty:
-            logger.warning(f"Данные ПУСТЫЕ/недоступны: {', '.join(empty)}")
+        return {
+            "decisions": decisions,
+            "market_outlook": "Fallback mode — rule-based decisions",
+            "risk_level": "medium",
+        }
 
     def _execute_decision(self, decision: dict, balance: float):
         """Execute a single AI trading decision."""
@@ -332,21 +423,21 @@ class TradingAgent:
         reason = decision.get("reason", "")
         params = decision.get("params", {})
 
-        if confidence < 0.6 and action != "hold":
-            logger.info(f"Пропускаем {symbol} {action}: низкая уверенность ({confidence})")
+        min_conf = self.drawdown.get_min_confidence()
+        if confidence < min_conf and action not in ("hold", "close", "update_sl"):
+            logger.info(f"Skip {symbol} {action}: confidence {confidence} < {min_conf}")
             return
 
-        logger.info(f"{'[БУМАГА] ' if self.mode == 'paper' else ''}Исполняем: {action} {symbol} (уверенность={confidence})")
-        logger.info(f"  Причина: {reason}")
+        logger.info(f"{'[PAPER] ' if self.mode == 'paper' else ''}Execute: {action} {symbol} (conf={confidence})")
+        logger.info(f"  Reason: {reason}")
 
         if self.mode == "paper":
             self._execute_paper(decision, balance)
         else:
-            # demo and live both send real orders (demo goes to Bitget demo exchange)
             self._execute_live(decision, balance)
 
     def _execute_paper(self, decision: dict, balance: float):
-        """Paper trading - log decisions without real orders."""
+        """Paper trading execution."""
         symbol = decision.get("symbol")
         action = decision.get("action")
         confidence = decision.get("confidence", 0)
@@ -361,73 +452,50 @@ class TradingAgent:
         if action in ("open_long", "open_short"):
             side = "long" if action == "open_long" else "short"
             atr = self._get_atr(symbol)
-            stop_loss = self.risk.compute_stop_loss(price, side, atr)
-            take_profit = self.risk.compute_take_profit(price, side, atr)
-            amount = self.risk.calculate_position_size(balance, price, stop_loss)
+
+            # Dynamic exits based on regime
+            regime = "normal"  # Would come from regime_detector in full cycle
+            exit_plan = self.exit_manager.calculate_exits(price, side, atr, regime)
+            if exit_plan is None:
+                logger.warning(f"[PAPER] Bad R/R for {symbol}, skipping")
+                return
+
+            stop_loss = exit_plan.stop_loss
+            take_profit = exit_plan.take_profit_1
+
+            # Apply drawdown size multiplier
+            size_mult = self.drawdown.get_position_size_multiplier()
+            amount = self.risk.calculate_position_size(balance, price, stop_loss) * size_mult
 
             can_open, msg = self.risk.can_open_position(symbol, balance)
             if not can_open:
-                logger.warning(f"[БУМАГА] Не могу открыть {symbol}: {msg}")
+                logger.warning(f"[PAPER] Cannot open {symbol}: {msg}")
                 return
 
             self.risk.register_position(symbol, side, price, amount, stop_loss, take_profit)
-
-            trade = {
-                "time": datetime.now(timezone.utc).isoformat(),
-                "symbol": symbol,
-                "action": action,
-                "price": price,
-                "amount": amount,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "confidence": confidence,
-                "reason": reason,
-            }
-            self.paper_trades.append(trade)
-            logger.info(f"[БУМАГА] {action} {symbol} @ {price} | Объём: {amount:.6f} | SL: {stop_loss:.2f} | TP: {take_profit:.2f}")
+            logger.info(f"[PAPER] {action} {symbol} @ {price} | SL: {stop_loss:.2f} | TP: {take_profit:.2f} | R/R: {exit_plan.risk_reward}")
 
         elif action == "close":
             if symbol in self.risk.positions:
                 pnl = self.risk.close_position(symbol, price)
                 self.paper_balance += pnl
-                trade = {
-                    "time": datetime.now(timezone.utc).isoformat(),
-                    "symbol": symbol,
-                    "action": "close",
-                    "price": price,
-                    "pnl": pnl,
-                    "confidence": confidence,
-                    "reason": reason,
-                }
-                self.paper_trades.append(trade)
-                logger.info(f"[БУМАГА] Закрытие {symbol} @ {price} | PnL: {pnl:+.2f} USDT | Баланс: {self.paper_balance:.2f}")
-
-        elif action in ("trigger_long", "trigger_short"):
-            trigger_price = decision.get("params", {}).get("trigger_price")
-            if trigger_price:
-                side = "long" if action == "trigger_long" else "short"
-                logger.info(f"[БУМАГА] Триггерный ордер {side} {symbol} @ триггер {trigger_price} | Причина: {reason}")
-                trade = {
-                    "time": datetime.now(timezone.utc).isoformat(),
-                    "symbol": symbol,
-                    "action": action,
-                    "trigger_price": trigger_price,
-                    "confidence": confidence,
-                    "reason": reason,
-                }
-                self.paper_trades.append(trade)
+                self.drawdown.update(pnl, self.paper_balance)
+                self.trade_history.record_trade(
+                    symbol=symbol, side=self.risk.positions.get(symbol, type("", (), {"side": ""})()).side if hasattr(self.risk.positions.get(symbol), 'side') else "",
+                    entry_price=price, exit_price=price, amount=0,
+                    reason_close=reason,
+                )
+                logger.info(f"[PAPER] Close {symbol} @ {price} | PnL: {pnl:+.2f} | Balance: {self.paper_balance:.2f}")
 
         elif action == "hold":
-            logger.info(f"[БУМАГА] Удержание {symbol}: {reason}")
+            logger.info(f"[PAPER] Hold {symbol}: {reason}")
 
-        # Save paper trades to file
         self._save_paper_log()
-
         msg = self._format_paper_message(action, symbol, price, confidence, reason)
         self.notifier.send(msg)
 
     def _execute_live(self, decision: dict, balance: float):
-        """Live trading - place real orders."""
+        """Live/demo trading — place real orders."""
         symbol = decision.get("symbol")
         action = decision.get("action")
         confidence = decision.get("confidence", 0)
@@ -437,20 +505,25 @@ class TradingAgent:
         result = None
 
         try:
-            if action == "open_long":
+            if action in ("open_long", "open_short"):
                 ticker = self.exchange.fetch_ticker(symbol)
                 price = ticker["last"]
                 atr = self._get_atr(symbol)
-                result = self.orders.open_long(symbol, balance, price, atr)
 
-            elif action == "open_short":
-                ticker = self.exchange.fetch_ticker(symbol)
-                price = ticker["last"]
-                atr = self._get_atr(symbol)
-                result = self.orders.open_short(symbol, balance, price, atr)
+                # Apply drawdown position size multiplier
+                size_mult = self.drawdown.get_position_size_multiplier()
+                if size_mult <= 0:
+                    logger.info(f"Position sizing blocked by drawdown breaker")
+                    return
+
+                side = "long" if action == "open_long" else "short"
+
+                if side == "long":
+                    result = self.orders.open_long(symbol, balance * size_mult, price, atr)
+                else:
+                    result = self.orders.open_short(symbol, balance * size_mult, price, atr)
 
             elif action == "close":
-                # Record trade in history before closing
                 if symbol in self.risk.positions:
                     pos = self.risk.positions[symbol]
                     ticker = self.exchange.fetch_ticker(symbol)
@@ -459,192 +532,98 @@ class TradingAgent:
                     self.trade_history.record_trade(
                         symbol=symbol, side=pos.side,
                         entry_price=pos.entry_price, exit_price=exit_price,
-                        amount=pos.amount, reason_open="", reason_close=reason,
+                        amount=pos.amount, reason_close=reason,
                         duration_minutes=duration,
                     )
                 result = self.orders.close_position(symbol)
+                if result:
+                    self.drawdown.update(result.get("pnl", 0), self.exchange.fetch_usdt_balance())
 
             elif action == "update_sl":
                 new_sl = params.get("new_stop_loss")
                 if new_sl:
                     result = self.orders.update_stop_loss(symbol, new_sl)
 
-            elif action == "trigger_long":
-                trigger_price = params.get("trigger_price")
-                if trigger_price:
-                    atr = self._get_atr(symbol)
-                    result = self.orders.place_trigger_order(symbol, "long", balance, trigger_price, atr)
-
-            elif action == "trigger_short":
-                trigger_price = params.get("trigger_price")
-                if trigger_price:
-                    atr = self._get_atr(symbol)
-                    result = self.orders.place_trigger_order(symbol, "short", balance, trigger_price, atr)
-
             elif action == "hold":
-                logger.info(f"Удержание {symbol}: {reason}")
+                logger.info(f"Hold {symbol}: {reason}")
 
             if result:
                 msg = self._format_trade_message(action, symbol, confidence, reason, result)
                 self.notifier.send(msg)
-                logger.info(f"Исполнено: {result}")
-            elif action != "hold":
-                # Notify about skipped/failed orders so user knows
-                msg = self._format_skipped_message(action, symbol, confidence, reason)
-                self.notifier.send(msg)
+                logger.info(f"Executed: {result}")
 
         except Exception as e:
-            logger.error(f"Ошибка исполнения {action} для {symbol}: {e}")
-            msg = self._format_error_message(action, symbol, e)
-            self.notifier.send(msg)
+            logger.error(f"Execution error {action} {symbol}: {e}")
+            self.notifier.send(f"\u274C <b>ERROR</b> {action} {symbol}: {e}")
 
-    # ── Telegram message formatting ──────────────────────────────
+    def _log_structured_decision(self, decision: dict, aggregated_signals: dict, regime_data: dict):
+        """Log structured decision for post-analysis."""
+        symbol = decision.get("symbol", "")
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "action": decision.get("action"),
+            "confidence": decision.get("confidence"),
+            "reason": decision.get("reason"),
+            "regime": regime_data.get(symbol, {}).get("regime", "unknown"),
+            "signal_score": aggregated_signals.get(symbol, {}).get("weighted_score", 0),
+            "tier1_conflict": aggregated_signals.get(symbol, {}).get("tier1_conflict", False),
+            "result_pnl": None,  # Filled after close
+        }
+        self._decision_log.append(entry)
+
+        # Persist every 10 decisions
+        if len(self._decision_log) % 10 == 0:
+            self._save_decision_log()
+
+    def _save_decision_log(self):
+        """Save structured decision log."""
+        log_file = Path("data/decision_log.json")
+        log_file.write_text(json.dumps(self._decision_log[-500:], indent=1, ensure_ascii=False))
+
+    # ── Telegram message formatting ──────────────────────────
 
     @staticmethod
     def _action_emoji(action: str) -> str:
         emojis = {
-            "open_long": "\U0001F7E2",     # 🟢
-            "open_short": "\U0001F534",     # 🔴
-            "close": "\U0001F512",          # 🔒
-            "close_position": "\U0001F512", # 🔒
-            "update_sl": "\U0001F6E1",      # 🛡
-            "trigger_long": "\u23F3",       # ⏳
-            "trigger_short": "\u23F3",      # ⏳
-            "hold": "\u23F8",               # ⏸
+            "open_long": "\U0001F7E2", "open_short": "\U0001F534",
+            "close": "\U0001F512", "close_position": "\U0001F512",
+            "update_sl": "\U0001F6E1", "hold": "\u23F8",
         }
-        return emojis.get(action, "\U0001F4CA")  # 📊
+        return emojis.get(action, "\U0001F4CA")
 
     @staticmethod
     def _action_label(action: str) -> str:
         labels = {
-            "open_long": "ЛОНГ ОТКРЫТ",
-            "open_short": "ШОРТ ОТКРЫТ",
-            "close": "ПОЗИЦИЯ ЗАКРЫТА",
-            "close_position": "ПОЗИЦИЯ ЗАКРЫТА",
-            "update_sl": "СТОП-ЛОСС ОБНОВЛЁН",
-            "trigger_long": "ТРИГГЕР ЛОНГ",
-            "trigger_short": "ТРИГГЕР ШОРТ",
-            "hold": "УДЕРЖАНИЕ",
+            "open_long": "LONG", "open_short": "SHORT",
+            "close": "CLOSE", "close_position": "CLOSE",
+            "update_sl": "SL UPDATE", "hold": "HOLD",
         }
         return labels.get(action, action.upper())
-
-    @staticmethod
-    def _confidence_bar(confidence: float) -> str:
-        filled = round(confidence * 10)
-        return "\u2588" * filled + "\u2591" * (10 - filled)
 
     def _format_trade_message(self, action: str, symbol: str, confidence: float,
                               reason: str, result: dict) -> str:
         emoji = self._action_emoji(action)
         label = self._action_label(action)
-        bar = self._confidence_bar(confidence)
         coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
-
-        lines = [
-            f"{emoji} <b>{label}</b>  {coin}",
-            "",
-        ]
-
-        # Order details
+        lines = [f"{emoji} <b>{label}</b> {coin} | conf={confidence:.0%}"]
         if action in ("open_long", "open_short"):
-            entry = result.get("entry_price", "—")
-            sl = result.get("stop_loss", "—")
-            tp = result.get("take_profit", "—")
-            amt = result.get("amount", "—")
-            lines += [
-                f"\U0001F4B0 Цена входа:  <code>{entry}</code>",
-                f"\U0001F4E6 Объём:  <code>{amt}</code>",
-                f"\U0001F6D1 Стоп-лосс:  <code>{sl}</code>",
-                f"\U0001F3AF Тейк-профит:  <code>{tp}</code>",
-            ]
+            lines.append(f"Entry: {result.get('entry_price')} | SL: {result.get('stop_loss')} | TP: {result.get('take_profit')}")
         elif action in ("close", "close_position"):
-            exit_p = result.get("exit_price", "—")
             pnl = result.get("pnl")
-            side = result.get("side", "")
-            pnl_emoji = "\U0001F4B5" if pnl and pnl >= 0 else "\U0001F4B8"
-            pnl_str = f"{pnl:+.2f} USDT" if pnl is not None else "—"
-            lines += [
-                f"\U0001F4C8 Сторона:  {side}",
-                f"\U0001F4B0 Цена выхода:  <code>{exit_p}</code>",
-                f"{pnl_emoji} PnL:  <b>{pnl_str}</b>",
-            ]
-        elif action == "update_sl":
-            new_sl = result.get("new_stop_loss", "—")
-            lines.append(f"\U0001F6E1 Новый SL:  <code>{new_sl}</code>")
-        elif action in ("trigger_long", "trigger_short"):
-            trig = result.get("trigger_price", "—")
-            amt = result.get("amount", "—")
-            sl = result.get("stop_loss", "—")
-            tp = result.get("take_profit", "—")
-            lines += [
-                f"\u23F3 Триггер цена:  <code>{trig}</code>",
-                f"\U0001F4E6 Объём:  <code>{amt}</code>",
-                f"\U0001F6D1 Стоп-лосс:  <code>{sl}</code>",
-                f"\U0001F3AF Тейк-профит:  <code>{tp}</code>",
-            ]
-
-        lines += [
-            "",
-            f"\U0001F4CA Уверенность:  {confidence:.0%}  <code>{bar}</code>",
-            f"\U0001F4AC {reason}",
-            "",
-            "\u2500" * 20,
-        ]
+            lines.append(f"Exit: {result.get('exit_price')} | PnL: {pnl:+.2f} USDT" if pnl else "")
+        lines.append(f"{reason}")
         return "\n".join(lines)
 
     def _format_paper_message(self, action: str, symbol: str, price: float,
                               confidence: float, reason: str) -> str:
         emoji = self._action_emoji(action)
         label = self._action_label(action)
-        bar = self._confidence_bar(confidence)
         coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
-
-        lines = [
-            f"\U0001F4DD <b>[БУМАГА]</b>  {emoji} <b>{label}</b>  {coin}",
-            "",
-            f"\U0001F4B0 Цена:  <code>{price}</code>",
-            f"\U0001F4CA Уверенность:  {confidence:.0%}  <code>{bar}</code>",
-            f"\U0001F4AC {reason}",
-            "",
-            "\u2500" * 20,
-        ]
-        return "\n".join(lines)
-
-    def _format_skipped_message(self, action: str, symbol: str,
-                                confidence: float, reason: str) -> str:
-        coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
-        lines = [
-            f"\u26A0\uFE0F <b>ОРДЕР НЕ ИСПОЛНЕН</b>  {coin}",
-            "",
-            f"\U0001F3AF Действие:  {self._action_label(action)}",
-            f"\U0001F4CA Уверенность:  {confidence:.0%}",
-            f"\U0001F4AC {reason}",
-            "",
-            "<i>Причина: не прошёл проверку риска или расчёт позиции</i>",
-            "",
-            "\u2500" * 20,
-        ]
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_error_message(action: str, symbol: str, error: Exception) -> str:
-        coin = symbol.replace("/USDT:USDT", "").replace("/USDT", "") if symbol else "?"
-        lines = [
-            f"\u274C <b>ОШИБКА ИСПОЛНЕНИЯ</b>",
-            "",
-            f"\U0001F4C8 {action}  {coin}",
-            f"\U0001F6A8 <code>{error}</code>",
-            "",
-            "\u2500" * 20,
-        ]
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_status_message(text: str) -> str:
-        return f"\U0001F916 <b>{text}</b>"
+        return f"\U0001F4DD [PAPER] {emoji} <b>{label}</b> {coin} @ {price} | conf={confidence:.0%}\n{reason}"
 
     def _get_atr(self, symbol: str) -> float | None:
-        """Get latest ATR value for a symbol (5m timeframe for scalping)."""
+        """Get latest ATR value for a symbol (5m)."""
         try:
             df = self.exchange.fetch_ohlcv(symbol, "5m", limit=50)
             df_analyzed = self.analyzer.compute_indicators(df)
@@ -653,7 +632,6 @@ class TradingAgent:
             return None
 
     def _save_paper_log(self):
-        """Save paper trading log to file."""
         log_file = Path("data/paper_trades.json")
         data = {
             "balance": self.paper_balance,
@@ -664,59 +642,77 @@ class TradingAgent:
         }
         log_file.write_text(json.dumps(data, indent=2))
 
+    def _get_adaptive_interval(self) -> int:
+        """Adaptive cycle interval based on market volatility.
+
+        High volatility → faster cycles (60s)
+        Low volatility → slower cycles (300s)
+        Normal → 120s
+        """
+        try:
+            df = self.exchange.fetch_ohlcv(self.symbols[0], "5m", limit=30)
+            if len(df) < 20:
+                return 120
+
+            from analysis.scalping import ScalpingAnalyzer
+            vr = ScalpingAnalyzer.volatility_micro_regime(df)
+            atr_ratio = vr.get("atr_ratio", 1.0)
+
+            if atr_ratio > 1.5:
+                return 60   # High volatility — faster
+            elif atr_ratio < 0.5:
+                return 300  # Dead market — slower
+            else:
+                return 120  # Normal
+        except Exception:
+            return 120
+
     def run(self, once: bool = False):
-        """Main loop."""
+        """Main loop with adaptive interval."""
         self.notifier.send(
-            f"\U0001F680 <b>Торговый агент ЗАПУЩЕН</b>\n\n"
-            f"\U0001F3AE Режим: <b>{self.mode.upper()}</b>\n"
-            f"\U0001F4CA Символы: {', '.join(self.symbols)}\n"
-            f"\u23F1 Интервал: {config.trading.analysis_interval_minutes} мин"
+            f"\U0001F680 <b>Trading Agent v3.0 STARTED</b>\n"
+            f"Mode: <b>{self.mode.upper()}</b>\n"
+            f"Symbols: {', '.join(self.symbols)}"
         )
 
         if once:
             self.run_cycle()
-            logger.info("Один цикл завершён. Выходим.")
             return
 
         while True:
             try:
                 self.run_cycle()
             except KeyboardInterrupt:
-                logger.info("Плавное завершение работы...")
-                self.notifier.send(
-                    f"\U0001F6D1 <b>Торговый агент ОСТАНОВЛЕН</b>\n\n"
-                    f"\U0001F3AE Режим: {self.mode.upper()}"
-                )
+                logger.info("Shutting down...")
+                self._save_decision_log()
+                self.notifier.send(f"\U0001F6D1 <b>Agent STOPPED</b>")
                 break
             except Exception as e:
-                logger.error(f"Ошибка цикла: {e}")
-                self.notifier.send(
-                    f"\u274C <b>ОШИБКА ЦИКЛА</b>\n\n"
-                    f"\U0001F6A8 <code>{e}</code>"
-                )
+                logger.error(f"Cycle error: {e}")
+                self.notifier.send(f"\u274C <b>CYCLE ERROR</b>\n{e}")
 
-            wait_seconds = config.trading.analysis_interval_minutes * 60
-            logger.info(f"Следующий цикл через {config.trading.analysis_interval_minutes} мин...")
-            time.sleep(wait_seconds)
+            wait = self._get_adaptive_interval()
+            logger.info(f"Next cycle in {wait}s...")
+            time.sleep(wait)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ИИ Торговый Агент")
-    parser.add_argument("--live", action="store_true", help="Запуск в режиме live (реальные деньги!)")
-    parser.add_argument("--once", action="store_true", help="Выполнить один цикл и выйти")
+    parser = argparse.ArgumentParser(description="AI Trading Agent v3.0")
+    parser.add_argument("--live", action="store_true", help="Live trading mode")
+    parser.add_argument("--once", action="store_true", help="Run one cycle")
     args = parser.parse_args()
 
     mode = "live" if args.live else TRADING_MODE
 
     if mode == "live":
         logger.warning("!" * 60)
-        logger.warning("  LIVE РЕЖИМ — РЕАЛЬНЫЕ ДЕНЬГИ ПОД УГРОЗОЙ!")
-        logger.warning("  Нажми Ctrl+C в течение 5 секунд для отмены...")
+        logger.warning("  LIVE MODE — REAL MONEY AT RISK!")
+        logger.warning("  Press Ctrl+C within 5 seconds to cancel...")
         logger.warning("!" * 60)
         try:
             time.sleep(5)
         except KeyboardInterrupt:
-            logger.info("Отменено.")
+            logger.info("Cancelled.")
             return
 
     agent = TradingAgent(mode=mode)

@@ -38,7 +38,7 @@ class TechnicalAnalyzer:
                 df[col] = float("nan")
             return df
 
-        # Trend indicators (быстрые EMA для скальпинга + стандартные)
+        # Trend: fast EMAs for scalping (3/5/8/13/21) — REMOVED slow SMA 50/200
         df["ema_3"] = ta.trend.ema_indicator(df["close"], window=3)
         df["ema_5"] = ta.trend.ema_indicator(df["close"], window=5)
         df["ema_8"] = ta.trend.ema_indicator(df["close"], window=8)
@@ -46,23 +46,19 @@ class TechnicalAnalyzer:
         df["ema_13"] = ta.trend.ema_indicator(df["close"], window=13)
         df["ema_21"] = ta.trend.ema_indicator(df["close"], window=21)
         df["ema_50"] = ta.trend.ema_indicator(df["close"], window=50)
-        df["ema_200"] = ta.trend.ema_indicator(df["close"], window=200)
-        df["sma_50"] = ta.trend.sma_indicator(df["close"], window=50)
-        df["sma_200"] = ta.trend.sma_indicator(df["close"], window=200)
 
-        # MACD (стандартный + быстрый для скальпинга)
+        # Fast MACD for scalping (5, 13, 4) — REMOVED standard MACD (too slow)
+        macd_fast = ta.trend.MACD(df["close"], window_slow=13, window_fast=5, window_sign=4)
+        df["macd_fast"] = macd_fast.macd()
+        df["macd_fast_signal"] = macd_fast.macd_signal()
+        df["macd_fast_histogram"] = macd_fast.macd_diff()
+        # Keep standard MACD for multi-timeframe (5m/15m) only
         macd = ta.trend.MACD(df["close"])
         df["macd"] = macd.macd()
         df["macd_signal"] = macd.macd_signal()
         df["macd_histogram"] = macd.macd_diff()
 
-        # Быстрый MACD для скальпинга (5, 13, 4)
-        macd_fast = ta.trend.MACD(df["close"], window_slow=13, window_fast=5, window_sign=4)
-        df["macd_fast"] = macd_fast.macd()
-        df["macd_fast_signal"] = macd_fast.macd_signal()
-        df["macd_fast_histogram"] = macd_fast.macd_diff()
-
-        # RSI (стандартный + быстрые для скальпинга)
+        # RSI: fast for scalping (3/6/14)
         df["rsi"] = ta.momentum.rsi(df["close"], window=14)
         df["rsi_6"] = ta.momentum.rsi(df["close"], window=6)
         df["rsi_3"] = ta.momentum.rsi(df["close"], window=3)
@@ -95,12 +91,8 @@ class TechnicalAnalyzer:
         df["volume_sma_20"] = df["volume"].rolling(window=20).mean()
         df["volume_ratio"] = df["volume"] / df["volume_sma_20"]
 
-        # Ichimoku
-        ichimoku = ta.trend.IchimokuIndicator(df["high"], df["low"])
-        df["ichimoku_a"] = ichimoku.ichimoku_a()
-        df["ichimoku_b"] = ichimoku.ichimoku_b()
-        df["ichimoku_base"] = ichimoku.ichimoku_base_line()
-        df["ichimoku_conv"] = ichimoku.ichimoku_conversion_line()
+        # REMOVED: Ichimoku Cloud — too lagging for 1m/5m scalping
+        # REMOVED: SMA 50/200 — daily/weekly indicators, useless for scalping
 
         # Support/Resistance levels
         df["pivot"] = (df["high"] + df["low"] + df["close"]) / 3
@@ -112,6 +104,9 @@ class TechnicalAnalyzer:
         df["vpoc"] = vpoc_data["vpoc"]
         df["vah"] = vpoc_data["vah"]
         df["val"] = vpoc_data["val"]
+
+        # RVOL — Relative Volume (current vs average same period)
+        df["rvol"] = df["volume"] / df["volume_sma_20"]
 
         return df
 
@@ -367,94 +362,45 @@ class TechnicalAnalyzer:
             "price": round(float(latest["close"]), 6),
             "change_1_candle": round(float((latest["close"] - prev["close"]) / prev["close"] * 100), 4),
 
-            # Scalping EMA (быстрые)
-            "ema_3": round(float(latest.get("ema_3", 0)), 6),
-            "ema_5": round(float(latest.get("ema_5", 0)), 6),
-            "ema_8": round(float(latest.get("ema_8", 0)), 6),
-            "ema_13": round(float(latest.get("ema_13", 0)), 6),
-
-            # Trend
-            "ema_9": round(float(latest["ema_9"]), 6),
-            "ema_21": round(float(latest["ema_21"]), 6),
-            "ema_50": round(float(latest["ema_50"]), 6),
-            "ema_200": round(float(latest.get("ema_200", 0)), 6),
+            # Scalping EMA alignment (3/8/21) — Tier 2
             "scalp_trend": "bullish" if latest.get("ema_3", 0) > latest.get("ema_8", 0) > latest.get("ema_21", 0) else (
                 "bearish" if latest.get("ema_3", 0) < latest.get("ema_8", 0) < latest.get("ema_21", 0) else "mixed"
             ),
             "trend_short": "bullish" if latest["ema_9"] > latest["ema_21"] else "bearish",
-            "trend_medium": "bullish" if latest["ema_21"] > latest["ema_50"] else "bearish",
-            "golden_cross": bool(latest["sma_50"] > latest["sma_200"]),
 
-            # Momentum
-            "rsi": round(float(latest["rsi"]), 2),
-            "rsi_zone": "overbought" if latest["rsi"] > 70 else ("oversold" if latest["rsi"] < 30 else "neutral"),
-            "macd": round(float(latest["macd"]), 6),
-            "macd_signal": round(float(latest["macd_signal"]), 6),
-            "macd_histogram": round(float(latest["macd_histogram"]), 6),
-            "macd_crossover": "bullish" if latest["macd"] > latest["macd_signal"] and prev["macd"] <= prev["macd_signal"] else (
-                "bearish" if latest["macd"] < latest["macd_signal"] and prev["macd"] >= prev["macd_signal"] else "none"
-            ),
-            # Быстрый MACD для скальпинга
-            "macd_fast": round(float(latest.get("macd_fast", 0)), 6),
-            "macd_fast_signal": round(float(latest.get("macd_fast_signal", 0)), 6),
+            # Fast MACD crossover (5/13/4) — Tier 2
             "macd_fast_histogram": round(float(latest.get("macd_fast_histogram", 0)), 6),
             "macd_fast_crossover": "bullish" if latest.get("macd_fast", 0) > latest.get("macd_fast_signal", 0) and prev.get("macd_fast", 0) <= prev.get("macd_fast_signal", 0) else (
                 "bearish" if latest.get("macd_fast", 0) < latest.get("macd_fast_signal", 0) and prev.get("macd_fast", 0) >= prev.get("macd_fast_signal", 0) else "none"
             ),
-            "rsi_3": round(float(latest.get("rsi_3", 50)), 2),
-            "stoch_rsi_k": round(float(latest["stoch_rsi_k"]), 2),
-            "stoch_rsi_d": round(float(latest["stoch_rsi_d"]), 2),
 
-            # Volatility
-            "bb_upper": round(float(latest["bb_upper"]), 6),
-            "bb_lower": round(float(latest["bb_lower"]), 6),
+            # RSI-3 for extremes — Tier 2
+            "rsi_3": round(float(latest.get("rsi_3", 50)), 2),
+            "rsi": round(float(latest["rsi"]), 2),
+
+            # Volatility — Tier 3 (for sizing, not direction)
             "bb_position": round(float(latest["bb_pct"]), 2),
+            "bb_width": round(float(latest["bb_width"]), 4) if not pd.isna(latest.get("bb_width")) else 0,
             "atr": round(float(latest["atr"]), 6),
             "atr_pct": round(float(latest["atr"] / latest["close"] * 100), 2),
 
-            # Trend strength
+            # ADX trend strength — Tier 2
             "adx": round(float(latest["adx"]), 2),
-            "trend_strength": "strong" if latest["adx"] > 25 else "weak",
 
-            # Volume
-            "volume": float(latest["volume"]),
-            "volume_ratio": round(float(latest["volume_ratio"]), 2),
-            "obv_rising": bool(latest["obv"] > prev["obv"]),
+            # Volume — Tier 2
+            "volume_ratio": round(float(latest["volume_ratio"]), 2) if not pd.isna(latest.get("volume_ratio")) else 1.0,
+            "rvol": round(float(latest.get("rvol", 1.0)), 2) if not pd.isna(latest.get("rvol")) else 1.0,
 
-            # Support/Resistance
+            # Key S/R levels
             "support_1": round(float(latest["support_1"]), 6),
             "resistance_1": round(float(latest["resistance_1"]), 6),
             "vwap": round(float(latest["vwap"]), 6),
-            "price_vs_vwap": "above" if latest["close"] > latest["vwap"] else "below",
 
-            # Ichimoku
-            "above_cloud": bool(latest["close"] > max(latest["ichimoku_a"], latest["ichimoku_b"])),
-
-            # Volume Profile
+            # VPOC
             "vpoc": round(float(latest["vpoc"]), 6) if not pd.isna(latest.get("vpoc", float("nan"))) else None,
-            "value_area_high": round(float(latest["vah"]), 6) if not pd.isna(latest.get("vah", float("nan"))) else None,
-            "value_area_low": round(float(latest["val"]), 6) if not pd.isna(latest.get("val", float("nan"))) else None,
-            "price_vs_vpoc": (
-                "above" if not pd.isna(latest.get("vpoc", float("nan"))) and latest["close"] > latest["vpoc"]
-                else "below" if not pd.isna(latest.get("vpoc", float("nan"))) else None
-            ),
 
-            # Support/Resistance levels
-            "sr_levels": self.compute_support_resistance(df),
-            # Order blocks (institutional zones)
-            "order_blocks": self.detect_order_blocks(df),
-            # Liquidity zones (stop hunt areas)
-            "liquidity_zones": self.detect_liquidity_zones(df),
-
-            # Скальпинг-метрики
-            "momentum_roc_3": round(float((latest["close"] - df["close"].iloc[-4]) / df["close"].iloc[-4] * 100), 4) if len(df) > 4 else 0,
-            "momentum_roc_5": round(float((latest["close"] - df["close"].iloc[-6]) / df["close"].iloc[-6] * 100), 4) if len(df) > 6 else 0,
-            "candle_body_pct": round(float(abs(latest["close"] - latest["open"]) / latest["close"] * 100), 4),
-            "candle_direction": "bullish" if latest["close"] > latest["open"] else "bearish",
-            "upper_wick_pct": round(float((latest["high"] - max(latest["close"], latest["open"])) / latest["close"] * 100), 4),
-            "lower_wick_pct": round(float((min(latest["close"], latest["open"]) - latest["low"]) / latest["close"] * 100), 4),
-            "consecutive_direction": self._count_consecutive_candles(df),
-            "price_vs_ema8": round(float((latest["close"] - latest.get("ema_8", latest["close"])) / latest["close"] * 100), 4) if not pd.isna(latest.get("ema_8", float("nan"))) else 0,
+            # REMOVED: Ichimoku, SMA 50/200, golden_cross — useless for scalping
+            # REMOVED: detailed order blocks, liquidity zones — too much noise
         }
 
         logger.debug(f"Analysis summary for {symbol}: RSI={summary['rsi']}, trend={summary['trend_short']}")
