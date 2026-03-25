@@ -639,97 +639,86 @@ class QuantAnalyzer:
     # ──────────────────────────────────────────────
 
     def full_quant_analysis(self, df: pd.DataFrame, short_term: bool = True) -> dict:
-        """Run all quantitative analyses on a DataFrame.
+        """Run quantitative analyses on a DataFrame.
+
+        For scalping (short_term=True): only fast, useful indicators.
+        REMOVED from main cycle: Hurst, FFT, ACF — need too many candles, noisy on 1m.
+        These can still be called separately for hourly regime detection.
 
         Args:
-            short_term: если True, использует укороченные окна для скальпинга.
+            short_term: если True, использует только быстрые индикаторы для скальпинга.
         """
         close = df["close"]
 
-        # Короткие окна для скальпинга
         z_window = 20 if short_term else 50
         lr_window = 20 if short_term else 50
         er_window = 10 if short_term else 20
         vol_span = 15 if short_term else 30
 
         result = {
-            "hurst_exponent": self.hurst_exponent(close, max_lag=50 if short_term else 100),
             "zscore": self.zscore_analysis(close, window=z_window),
-            "shannon_entropy": self.shannon_entropy(close, bins=15 if short_term else 20),
             "kalman_filter": self.kalman_filter(close),
-            "fft_cycles": self.fft_cycles(close),
             "linear_regression": self.linear_regression_channel(df, window=lr_window),
-            "autocorrelation": self.autocorrelation_analysis(close, max_lag=10 if short_term else 20),
             "volatility_forecast": self.volatility_forecast(close, span=vol_span),
             "efficiency_ratio": self.efficiency_ratio(close, window=er_window),
             "value_at_risk": self.value_at_risk(close),
         }
 
-        # Meta-analysis: combine signals for overall regime assessment
-        result["_regime_consensus"] = self._regime_consensus(result)
+        # REMOVED from every-cycle: hurst, fft, autocorrelation, shannon_entropy
+        # These are too slow/noisy for 3-min scalping cycles
+        # They can be computed hourly for regime detection via RegimeDetector
 
+        result["_regime_consensus"] = self._regime_consensus(result)
         return result
 
     def _regime_consensus(self, analysis: dict) -> dict:
-        """Combine all scientific indicators into a regime consensus."""
+        """Combine scientific indicators into a regime consensus.
+
+        Slimmed down for scalping: only uses fast indicators available every cycle.
+        """
         votes = {"trending": 0, "mean_reverting": 0, "random": 0, "high_risk": 0}
 
-        # Hurst
-        h = analysis["hurst_exponent"].get("regime", "")
-        if h == "trending":
-            votes["trending"] += 2
-        elif h == "mean_reverting":
-            votes["mean_reverting"] += 2
-        else:
-            votes["random"] += 1
-
         # Efficiency ratio
-        er_sig = analysis["efficiency_ratio"].get("signal", "")
+        er_sig = analysis.get("efficiency_ratio", {}).get("signal", "")
         if "highly" in er_sig:
-            votes["trending"] += 1
+            votes["trending"] += 2
         elif "choppy" in er_sig:
             votes["mean_reverting"] += 1
-
-        # Autocorrelation
-        ac_sig = analysis["autocorrelation"].get("signal", "")
-        if "momentum" in ac_sig:
-            votes["trending"] += 1
-        elif "mean_reversion" in ac_sig:
-            votes["mean_reverting"] += 1
+            votes["random"] += 1
 
         # Linear regression R²
-        r2 = analysis["linear_regression"].get("r_squared", 0)
+        r2 = analysis.get("linear_regression", {}).get("r_squared", 0)
         if r2 > 0.7:
-            votes["trending"] += 1
+            votes["trending"] += 2
         elif r2 < 0.3:
             votes["mean_reverting"] += 1
 
+        # Z-score extreme
+        z = abs(analysis.get("zscore", {}).get("zscore", 0))
+        if z > 2.0:
+            votes["mean_reverting"] += 1
+
         # Volatility
-        vol_sig = analysis["volatility_forecast"].get("signal", "")
+        vol_sig = analysis.get("volatility_forecast", {}).get("signal", "")
         if "spike" in vol_sig:
             votes["high_risk"] += 2
-
-        # Entropy
-        ent_sig = analysis["shannon_entropy"].get("signal", "")
-        if "chaos" in ent_sig:
-            votes["high_risk"] += 1
-            votes["random"] += 1
+        elif "compression" in vol_sig:
+            votes["trending"] += 1  # Breakout coming
 
         # VaR
-        var_sig = analysis["value_at_risk"].get("signal", "")
+        var_sig = analysis.get("value_at_risk", {}).get("signal", "")
         if "high" in var_sig:
             votes["high_risk"] += 1
 
-        # Determine winner
         regime = max(votes, key=votes.get)
         total_votes = sum(votes.values())
         confidence = votes[regime] / total_votes if total_votes > 0 else 0
 
         strategy_map = {
-            "trending": "Use momentum/trend-following strategies (EMA crossovers, breakouts)",
-            "mean_reverting": "Use mean-reversion strategies (buy oversold, sell overbought, fade extremes)",
-            "random": "Market is random — reduce exposure, no edge available",
-            "high_risk": "High risk regime — reduce all positions, tighten stops, consider hedging",
+            "trending": "momentum/trend-following",
+            "mean_reverting": "mean-reversion/fade extremes",
+            "random": "reduce exposure, no edge",
+            "high_risk": "reduce positions, tighten stops",
         }
 
         return {
