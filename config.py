@@ -29,14 +29,37 @@ class ClaudeConfig(BaseModel):
 
 class TradingConfig(BaseModel):
     symbols: list[str] = [
-        # Высоколиквидные пары для краткосрочной торговли (скальпинг)
+        # Топ по ликвидности и объёму
         "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
         "XRP/USDT",
         "BNB/USDT",
+        # Layer 1 / Infrastructure
+        "ADA/USDT",
+        "AVAX/USDT",
+        "DOT/USDT",
+        "LINK/USDT",
+        "SUI/USDT",
+        "APT/USDT",
+        "NEAR/USDT",
+        "TON/USDT",
+        # Layer 2 / DeFi
+        "ARB/USDT",
+        "OP/USDT",
+        "MATIC/USDT",
+        "UNI/USDT",
+        "AAVE/USDT",
+        # Мемкоины (высокая волатильность — хороши для скальпинга)
         "DOGE/USDT",
         "PEPE/USDT",
+        "WIF/USDT",
+        "SHIB/USDT",
+        "FLOKI/USDT",
+        # AI / Нарратив
+        "FET/USDT",
+        "RENDER/USDT",
+        "TAO/USDT",
     ]
     timeframes: list[str] = ["1m", "5m", "15m"]  # Короткие таймфреймы для скальпинга
     max_position_pct: float = 0.08  # Max 8% портфеля на сделку

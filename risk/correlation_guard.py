@@ -22,16 +22,50 @@ DEFAULT_CORRELATION_GROUPS = {
     "SOL_GROUP": ["SOL/USDT:USDT", "SOL/USDT"],
     "XRP_GROUP": ["XRP/USDT:USDT", "XRP/USDT"],
     "BNB_GROUP": ["BNB/USDT:USDT", "BNB/USDT"],
-    "DOGE_GROUP": ["DOGE/USDT:USDT", "DOGE/USDT", "PEPE/USDT:USDT", "PEPE/USDT"],
+    "L1_GROUP": ["ADA/USDT:USDT", "AVAX/USDT:USDT", "DOT/USDT:USDT", "NEAR/USDT:USDT", "APT/USDT:USDT", "SUI/USDT:USDT"],
+    "L2_GROUP": ["ARB/USDT:USDT", "OP/USDT:USDT", "MATIC/USDT:USDT"],
+    "DEFI_GROUP": ["UNI/USDT:USDT", "AAVE/USDT:USDT", "LINK/USDT:USDT"],
+    "MEME_GROUP": ["DOGE/USDT:USDT", "PEPE/USDT:USDT", "WIF/USDT:USDT", "SHIB/USDT:USDT", "FLOKI/USDT:USDT"],
+    "AI_GROUP": ["FET/USDT:USDT", "RENDER/USDT:USDT", "TAO/USDT:USDT"],
 }
 
 # High correlation pairs (typically > 0.7)
 HIGH_CORR_PAIRS = {
+    # BTC коррелирует почти со всем
     frozenset(["BTC/USDT:USDT", "ETH/USDT:USDT"]): 0.85,
     frozenset(["BTC/USDT:USDT", "SOL/USDT:USDT"]): 0.80,
     frozenset(["BTC/USDT:USDT", "BNB/USDT:USDT"]): 0.75,
+    frozenset(["BTC/USDT:USDT", "AVAX/USDT:USDT"]): 0.72,
+    # ETH и L1/L2
     frozenset(["ETH/USDT:USDT", "SOL/USDT:USDT"]): 0.82,
+    frozenset(["ETH/USDT:USDT", "AVAX/USDT:USDT"]): 0.78,
+    frozenset(["ETH/USDT:USDT", "ARB/USDT:USDT"]): 0.80,
+    frozenset(["ETH/USDT:USDT", "OP/USDT:USDT"]): 0.78,
+    frozenset(["ETH/USDT:USDT", "MATIC/USDT:USDT"]): 0.75,
+    # L2 между собой
+    frozenset(["ARB/USDT:USDT", "OP/USDT:USDT"]): 0.85,
+    frozenset(["ARB/USDT:USDT", "MATIC/USDT:USDT"]): 0.72,
+    # L1 между собой
+    frozenset(["SOL/USDT:USDT", "AVAX/USDT:USDT"]): 0.75,
+    frozenset(["SOL/USDT:USDT", "SUI/USDT:USDT"]): 0.78,
+    frozenset(["SOL/USDT:USDT", "APT/USDT:USDT"]): 0.74,
+    frozenset(["SUI/USDT:USDT", "APT/USDT:USDT"]): 0.80,
+    frozenset(["ADA/USDT:USDT", "DOT/USDT:USDT"]): 0.73,
+    frozenset(["NEAR/USDT:USDT", "AVAX/USDT:USDT"]): 0.72,
+    # Мемкоины
+    frozenset(["DOGE/USDT:USDT", "SHIB/USDT:USDT"]): 0.75,
     frozenset(["DOGE/USDT:USDT", "PEPE/USDT:USDT"]): 0.70,
+    frozenset(["PEPE/USDT:USDT", "WIF/USDT:USDT"]): 0.72,
+    frozenset(["PEPE/USDT:USDT", "FLOKI/USDT:USDT"]): 0.74,
+    frozenset(["WIF/USDT:USDT", "FLOKI/USDT:USDT"]): 0.70,
+    frozenset(["SHIB/USDT:USDT", "FLOKI/USDT:USDT"]): 0.72,
+    # AI токены
+    frozenset(["FET/USDT:USDT", "RENDER/USDT:USDT"]): 0.78,
+    frozenset(["FET/USDT:USDT", "TAO/USDT:USDT"]): 0.75,
+    frozenset(["RENDER/USDT:USDT", "TAO/USDT:USDT"]): 0.73,
+    # DeFi
+    frozenset(["UNI/USDT:USDT", "AAVE/USDT:USDT"]): 0.74,
+    frozenset(["LINK/USDT:USDT", "UNI/USDT:USDT"]): 0.70,
 }
 
 
