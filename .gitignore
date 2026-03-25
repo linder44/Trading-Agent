@@ -13,3 +13,4 @@ data/*.db
 *.sqlite3
 .idea/
 .vscode/
+.claude/settings.local.json
