@@ -637,7 +637,7 @@ class TradingAgent:
             return 120
 
     def run(self, once: bool = False):
-        """Main loop with adaptive interval."""
+        """Main loop — no pauses, continuous analysis."""
         self.notifier.send(
             f"\U0001F680 <b>Trading Agent v4.0 STARTED (rule-based)</b>\n"
             f"Mode: <b>{self.mode.upper()}</b>\n"
@@ -659,10 +659,7 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"Cycle error: {e}")
                 self.notifier.send(f"\u274C <b>CYCLE ERROR</b>\n{e}")
-
-            wait = self._get_adaptive_interval()
-            logger.info(f"Next cycle in {wait}s...")
-            time.sleep(wait)
+                time.sleep(5)  # only pause on error to avoid spam
 
 
 def main():
