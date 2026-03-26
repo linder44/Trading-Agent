@@ -1,15 +1,17 @@
 """
-Autonomous AI Trading Agent — Optimized Scalping v3.0
+Autonomous Trading Agent — Rule-Based Scalping v4.0
 
-Key improvements over v2.0:
-- SignalAggregator: weighted tier-based signals (Tier 1/2/3) instead of flat noise
+NO Claude API — fully deterministic SignalEngine.
+Zero cost, zero latency, reproducible decisions.
+
+Key features:
+- SignalEngine: cascading filters + numerical scoring (replaces Claude)
 - RegimeDetector: adapts strategy to market state (trend/range/squeeze/choppy)
 - DynamicExitManager: context-aware SL/TP with partial take profits
-- DrawdownBreaker: graduated loss protection (not just 5% hard stop)
+- DrawdownBreaker: graduated loss protection
 - CorrelationGuard: prevents over-concentrated positions
-- TapeReader + VWAPBands + DeltaDivergence: new scalping indicators
-- FastScanner: 30s quick checks + 2min full cycles (adaptive by volatility)
-- Fallback: rule-based decisions when Claude API is unavailable
+- TapeReader + VWAPBands + DeltaDivergence: scalping indicators
+- Adaptive cycle: 60s/120s/300s by volatility
 - Structured decision logging for post-analysis
 
 Usage:
@@ -51,7 +53,7 @@ from risk.dynamic_exits import DynamicExitManager
 from risk.drawdown_breaker import DrawdownBreaker
 from risk.correlation_guard import CorrelationGuard
 from orders.manager import OrderManager
-from agent.brain import TradingBrain
+from engine.signal_engine import SignalEngine
 from utils.notifications import Notifier
 
 
@@ -68,7 +70,7 @@ class TradingAgent:
         self.mode = mode
 
         logger.info("=" * 60)
-        logger.info("  AUTONOMOUS AI TRADING AGENT v3.0 (OPTIMIZED)")
+        logger.info("  AUTONOMOUS TRADING AGENT v4.0 (RULE-BASED)")
         logger.info(f"  Mode: {self.mode.upper()}")
         if self.mode == "paper":
             logger.info(f"  Paper balance: {config.paper.initial_balance} USDT")
@@ -82,7 +84,7 @@ class TradingAgent:
         self.analyzer = TechnicalAnalyzer()
         self.risk = RiskManager(config.trading)
         self.orders = OrderManager(self.exchange, self.risk)
-        self.brain = TradingBrain(config.claude)
+        self.engine = SignalEngine()
         self.notifier = Notifier(config.notifications)
 
         # New optimized modules
@@ -294,7 +296,7 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"Time-based exit check failed for {symbol}: {e}")
 
-        # ── AI DECISION ──────────────────────────────────────
+        # ── ENGINE DECISION (rule-based, no API) ──────────────
 
         if self.mode in ("demo", "live"):
             balance = self.exchange.fetch_usdt_balance()
@@ -307,31 +309,37 @@ class TradingAgent:
         logger.info(f"Balance: {balance:.2f} USDT | Positions: {portfolio['num_positions']} | "
                      f"Daily PnL: {drawdown_status['daily_pnl_pct']:+.1f}%")
 
-        # Send to Claude (with aggregated signals, not raw data)
-        logger.info("Sending aggregated signals to Claude AI...")
-        try:
-            decision = self.brain.analyze_and_decide(
-                technical_data=technical_data,
-                market_context={},  # REMOVED news/social from main cycle
-                portfolio=portfolio,
-                balance=balance,
-                onchain_data=onchain_data,
-                scalping_data=scalping_data,
-                aggregated_signals=aggregated_signals,
-                regime_data=regime_data,
-                tape_data=tape_data,
-                vwap_data=vwap_data,
-                delta_data=delta_data,
-                trade_history_data=trade_history_data,
-                time_context_data=time_context_data,
-                drawdown_status=drawdown_status,
-            )
-        except Exception as e:
-            # FALLBACK: use rule-based SignalAggregator when Claude is unavailable
-            logger.warning(f"Claude API failed ({e}), using rule-based fallback")
-            decision = self._fallback_decisions(aggregated_signals, regime_data)
+        # Build positions dict for engine
+        engine_positions = {}
+        for sym, pos in self.risk.positions.items():
+            age = self.risk.get_position_age_minutes(sym) or 0
+            engine_positions[sym] = {
+                "side": pos.side,
+                "entry_price": pos.entry_price,
+                "amount": pos.amount,
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "age_minutes": age,
+                "sl_at_breakeven": getattr(pos, "sl_at_breakeven", False),
+            }
 
-        logger.info(f"AI outlook: {decision.get('market_outlook', 'N/A')}")
+        # Rule-based engine — instant, free
+        logger.info("Running signal engine...")
+        decision = self.engine.decide(
+            technical_data=technical_data,
+            scalping_data=scalping_data,
+            tape_data=tape_data,
+            vwap_data=vwap_data,
+            delta_data=delta_data,
+            regime_data=regime_data,
+            onchain_data=onchain_data,
+            positions=engine_positions,
+            trade_history=self.trade_history.get_recent_trades(20) if hasattr(self.trade_history, 'get_recent_trades') else [],
+            daily_pnl=drawdown_status.get("daily_pnl_pct", 0),
+            symbols=self.symbols,
+        )
+
+        logger.info(f"Engine: {decision.get('market_outlook', 'N/A')}")
         logger.info(f"Risk level: {decision.get('risk_level', 'N/A')}")
 
         # ── EXECUTE DECISIONS ────────────────────────────────
@@ -375,45 +383,6 @@ class TradingAgent:
 
             # Log decision for analysis
             self._log_structured_decision(action, aggregated_signals, regime_data)
-
-    def _fallback_decisions(self, aggregated_signals: dict, regime_data: dict) -> dict:
-        """Rule-based fallback when Claude API is unavailable.
-
-        Uses SignalAggregator directly, with 50% position size reduction.
-        """
-        decisions = []
-        for symbol, sig in aggregated_signals.items():
-            if sig.get("tier1_conflict"):
-                continue
-            regime = regime_data.get(symbol, {})
-            if regime.get("regime") == "choppy":
-                continue
-
-            verdict = sig.get("verdict", "hold")
-            confidence = sig.get("confidence", 0) * regime.get("confidence_mult", 1.0) * 0.7  # Reduced for fallback
-
-            if verdict == "long" and confidence >= 0.4:
-                decisions.append({
-                    "symbol": symbol,
-                    "action": "open_long",
-                    "confidence": round(confidence, 2),
-                    "reason": f"[FALLBACK] {'; '.join(sig.get('top_reasons_for', [])[:2])}",
-                    "params": {},
-                })
-            elif verdict == "short" and confidence >= 0.4:
-                decisions.append({
-                    "symbol": symbol,
-                    "action": "open_short",
-                    "confidence": round(confidence, 2),
-                    "reason": f"[FALLBACK] {'; '.join(sig.get('top_reasons_for', [])[:2])}",
-                    "params": {},
-                })
-
-        return {
-            "decisions": decisions,
-            "market_outlook": "Fallback mode — rule-based decisions",
-            "risk_level": "medium",
-        }
 
     def _execute_decision(self, decision: dict, balance: float):
         """Execute a single AI trading decision."""
@@ -670,7 +639,7 @@ class TradingAgent:
     def run(self, once: bool = False):
         """Main loop with adaptive interval."""
         self.notifier.send(
-            f"\U0001F680 <b>Trading Agent v3.0 STARTED</b>\n"
+            f"\U0001F680 <b>Trading Agent v4.0 STARTED (rule-based)</b>\n"
             f"Mode: <b>{self.mode.upper()}</b>\n"
             f"Symbols: {', '.join(self.symbols)}"
         )
