@@ -654,11 +654,17 @@ class TradingAgent:
             except KeyboardInterrupt:
                 logger.info("Shutting down...")
                 self._save_decision_log()
-                self.notifier.send(f"\U0001F6D1 <b>Agent STOPPED</b>")
+                try:
+                    self.notifier.send(f"\U0001F6D1 <b>Agent STOPPED</b>")
+                except Exception:
+                    pass
                 break
             except Exception as e:
                 logger.error(f"Cycle error: {e}")
-                self.notifier.send(f"\u274C <b>CYCLE ERROR</b>\n{e}")
+                try:
+                    self.notifier.send(f"\u274C <b>CYCLE ERROR</b>\n{e}")
+                except Exception:
+                    pass
                 time.sleep(5)  # only pause on error to avoid spam
 
 
