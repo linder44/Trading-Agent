@@ -667,9 +667,17 @@ class SignalEngine:
             risk_level, self.cfg["base_position_pct"], min_conf
         )
 
+        logger.info(f"Engine: risk_level={risk_level}, min_score={min_score}, min_conf={adjusted_conf:.2f}")
+
         entry_decisions = []
+        gate_blocked = 0
+        conflict_blocked = 0
+        score_blocked = 0
+        rr_blocked = 0
+
         for symbol in symbols:
             if symbol in positions:
+                logger.debug(f"  {symbol}: SKIP (has open position)")
                 continue
 
             scalping = scalping_data.get(symbol, {})
@@ -681,7 +689,10 @@ class SignalEngine:
             regime = regime_data.get(symbol, {})
             onchain = onchain_data.get(symbol, {})
 
+            coin = symbol.replace("/USDT:USDT", "")
+
             if not scalping or not tech_1m:
+                logger.warning(f"  {coin}: SKIP (no data)")
                 continue
 
             # Gate check
@@ -689,6 +700,8 @@ class SignalEngine:
                 symbol, scalping, tech_1m, regime, positions, risk_level
             )
             if not passed:
+                logger.info(f"  {coin}: GATE BLOCKED — {reason}")
+                gate_blocked += 1
                 continue
 
             # Score
@@ -698,20 +711,40 @@ class SignalEngine:
             )
 
             if result["conflicts"]:
+                logger.info(f"  {coin}: TIER1 CONFLICT — signals disagree, no entry")
+                conflict_blocked += 1
                 continue
 
-            if result["score"] < min_score or result["confidence"] < adjusted_conf:
+            # Log scoring details for every symbol
+            direction = result["direction"]
+            score_val = result["score"]
+            conf = result["confidence"]
+
+            # Collect non-zero signal details
+            sig_parts = []
+            for name, sig in result["signals"].items():
+                s = sig.get("score", 0)
+                if s != 0:
+                    sig_parts.append(f"{name}={s:+.2f}")
+
+            regime_name = regime.get("regime", "?")
+            logger.info(f"  {coin}: {direction.upper()} score={score_val:.1f} conf={conf:.0%} "
+                        f"regime={regime_name} | {', '.join(sig_parts)}")
+
+            if score_val < min_score or conf < adjusted_conf:
+                logger.info(f"  {coin}: SKIP — score {score_val:.1f}<{min_score} or conf {conf:.2f}<{adjusted_conf:.2f}")
+                score_blocked += 1
                 continue
 
             # Calculate exits
-            direction = result["direction"]
             trade_type = result["trade_type"] or TradeType.MOMENTUM
             price = tech_1m.get("price", 0)
             atr = tech_1m.get("atr", price * 0.003 if price > 0 else None)
-            regime_name = regime.get("regime", "normal")
 
             exits = self.exit_manager.calculate(price, direction, trade_type, regime_name, atr)
             if exits is None:
+                logger.info(f"  {coin}: SKIP — bad R/R ratio")
+                rr_blocked += 1
                 continue
 
             action = Action.OPEN_LONG if direction == "long" else Action.OPEN_SHORT
@@ -727,7 +760,7 @@ class SignalEngine:
             d = Decision(
                 action=action,
                 symbol=symbol,
-                confidence=result["confidence"],
+                confidence=conf,
                 trade_type=trade_type,
                 stop_loss=exits["stop_loss"],
                 take_profit=exits["take_profit_1"],
@@ -738,12 +771,23 @@ class SignalEngine:
                 signals=result["signals"],
             )
             entry_decisions.append(d)
+            logger.info(f"  {coin}: >>> ENTRY SIGNAL <<< {action.value} conf={conf:.0%} "
+                        f"SL={exits['stop_loss']:.4f} TP={exits['take_profit_1']:.4f} "
+                        f"R/R={exits['risk_reward']}")
+
+        # Summary
+        logger.info(f"Engine summary: {len(entry_decisions)} entries, "
+                     f"{gate_blocked} gate-blocked, {conflict_blocked} conflicts, "
+                     f"{score_blocked} weak-score, {rr_blocked} bad-RR")
 
         # 3. Sort by confidence, take best
         entry_decisions.sort(key=lambda x: x.confidence, reverse=True)
 
         # 4. Correlation filter
+        before_corr = len(entry_decisions)
         entry_decisions = self.correlation_filter.filter(entry_decisions, positions)
+        if before_corr > len(entry_decisions):
+            logger.info(f"Correlation filter: {before_corr} -> {len(entry_decisions)} (removed correlated)")
 
         decisions.extend(entry_decisions)
 
