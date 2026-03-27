@@ -1,18 +1,12 @@
 """
-Autonomous Trading Agent — Rule-Based Scalping v4.0
+Autonomous Trading Agent — MACD + 200 EMA + S/R Strategy v5.0
 
-NO Claude API — fully deterministic SignalEngine.
-Zero cost, zero latency, reproducible decisions.
+Simple, deterministic, 3-component strategy:
+1. MACD(12,26,9) crossover for entry signal
+2. 200 EMA as trend filter
+3. Support/Resistance for confirmation
 
-Key features:
-- SignalEngine: cascading filters + numerical scoring (replaces Claude)
-- RegimeDetector: adapts strategy to market state (trend/range/squeeze/choppy)
-- DynamicExitManager: context-aware SL/TP with partial take profits
-- DrawdownBreaker: graduated loss protection
-- CorrelationGuard: prevents over-concentrated positions
-- TapeReader + VWAPBands + DeltaDivergence: scalping indicators
-- Adaptive cycle: 60s/120s/300s by volatility
-- Structured decision logging for post-analysis
+No AI, no complex indicators — just clean rules.
 
 Usage:
     python main.py              # Demo mode (Bitget demo account)
@@ -32,28 +26,12 @@ from loguru import logger
 from config import config, TRADING_MODE
 from exchange.client import ExchangeClient
 from analysis.technical import TechnicalAnalyzer
-from analysis.patterns import PatternRecognizer
-from analysis.onchain import OnChainAnalyzer
-from analysis.correlations import MarketCorrelations
-from analysis.quant import QuantAnalyzer
 from analysis.trade_history import TradeHistoryTracker
-from analysis.liquidations import LiquidationAnalyzer
-from analysis.cross_correlation import CrossCorrelationAnalyzer
-from analysis.time_context import TimeContextAnalyzer
-from analysis.scalping import ScalpingAnalyzer
-from analysis.signal_aggregator import SignalAggregator
-from analysis.regime_detector import RegimeDetector
-from analysis.tape_reader import TapeReader
-from analysis.vwap_bands import VWAPBands
-from analysis.delta_divergence import DeltaDivergence
-from news.fetcher import NewsFetcher
-from news.social import SocialSentiment
 from risk.manager import RiskManager
-from risk.dynamic_exits import DynamicExitManager
 from risk.drawdown_breaker import DrawdownBreaker
-from risk.correlation_guard import CorrelationGuard
 from orders.manager import OrderManager
 from engine.signal_engine import SignalEngine
+from engine.config import STRATEGY_CONFIG
 from utils.notifications import Notifier
 
 
@@ -64,54 +42,31 @@ logger.add("logs/trading_{time:YYYY-MM-DD}.log", rotation="1 day", retention="30
 
 
 class TradingAgent:
-    """Main orchestrator — optimized for scalping profitability."""
+    """Main orchestrator — MACD + EMA200 + S/R strategy."""
 
     def __init__(self, mode: str = "demo"):
         self.mode = mode
 
         logger.info("=" * 60)
-        logger.info("  AUTONOMOUS TRADING AGENT v4.0 (RULE-BASED)")
+        logger.info("  TRADING AGENT v5.0 (MACD + EMA200 + S/R)")
         logger.info(f"  Mode: {self.mode.upper()}")
         if self.mode == "paper":
             logger.info(f"  Paper balance: {config.paper.initial_balance} USDT")
         elif self.mode == "demo":
             logger.info("  Bitget Demo Account")
         logger.info(f"  Symbols: {config.trading.symbols}")
+        logger.info(f"  Signal TF: {STRATEGY_CONFIG['signal_timeframe']}, Trend TF: {STRATEGY_CONFIG['trend_timeframe']}")
         logger.info("=" * 60)
 
-        # Core modules
+        # Core modules — only what we need
         self.exchange = ExchangeClient(config.bitget)
         self.analyzer = TechnicalAnalyzer()
         self.risk = RiskManager(config.trading)
         self.orders = OrderManager(self.exchange, self.risk)
         self.engine = SignalEngine()
         self.notifier = Notifier(config.notifications)
-
-        # New optimized modules
-        self.signal_aggregator = SignalAggregator()
-        self.regime_detector = RegimeDetector()
-        self.exit_manager = DynamicExitManager()
         self.drawdown = DrawdownBreaker()
-        self.corr_guard = CorrelationGuard()
-        self.tape_reader = TapeReader()
-        self.vwap_bands = VWAPBands()
-        self.delta_div = DeltaDivergence()
-
-        # Retained modules (slimmed)
-        self.patterns = PatternRecognizer()
-        self.onchain = OnChainAnalyzer()
-        self.quant = QuantAnalyzer()
         self.trade_history = TradeHistoryTracker()
-        self.liquidations = LiquidationAnalyzer()
-        self.time_context = TimeContextAnalyzer()
-        self.scalping = ScalpingAnalyzer()
-
-        # Removed from main cycle: news, social, correlations, cross_correlation
-        # These are either too slow or irrelevant for 2-min scalping cycles
-        self.news = NewsFetcher(config.news)
-        self.social = SocialSentiment()
-        self.correlations = MarketCorrelations()
-        self.cross_corr = CrossCorrelationAnalyzer()
 
         # Validate symbols
         self.symbols = self.exchange.validate_symbols(config.trading.symbols)
@@ -125,10 +80,7 @@ class TradingAgent:
         self.paper_trades: list[dict] = []
 
         self._last_daily_reset = datetime.now(timezone.utc).date()
-        self._last_hourly_corr_update = 0.0
         self._cycle_count = 0
-
-        # Structured decision log
         self._decision_log: list[dict] = []
 
         Path("logs").mkdir(exist_ok=True)
@@ -147,18 +99,18 @@ class TradingAgent:
             self.drawdown.reset_daily()
             self._last_daily_reset = today
 
-        # Drawdown check — can we trade at all?
+        # Drawdown check
         can_trade, reason = self.drawdown.can_trade()
         if not can_trade:
             logger.warning(f"Trading blocked: {reason}")
             return
 
-        # Sync positions (demo/live)
+        # Sync positions
         if self.mode in ("demo", "live"):
             self.orders.sync_positions_from_exchange()
 
-        # Auto-close expired positions (90 min instead of 120)
-        max_age = 90
+        # Auto-close expired positions
+        max_age = STRATEGY_CONFIG["max_trade_minutes"]
         expired = self.risk.get_expired_positions(max_age)
         for symbol in expired:
             logger.warning(f"Position {symbol} expired (>{max_age} min), force closing")
@@ -175,23 +127,27 @@ class TradingAgent:
                 result = self.orders.close_position(symbol)
                 if result:
                     self.drawdown.update(result.get("pnl", 0), self.exchange.fetch_usdt_balance())
-                    self.notifier.send(
-                        f"\u23F0 <b>AUTO-CLOSE (>{max_age} min)</b>\n"
-                        f"{symbol} | PnL: {result.get('pnl', 0):+.2f} USDT"
-                    )
+                    try:
+                        self.notifier.send(
+                            f"\u23F0 <b>AUTO-CLOSE (>{max_age} min)</b>\n"
+                            f"{symbol} | PnL: {result.get('pnl', 0):+.2f} USDT"
+                        )
+                    except Exception:
+                        pass
 
         # ── DATA COLLECTION ──────────────────────────────────
+        # Only fetch what the strategy needs: signal TF + trend TF
 
-        # 1. OHLCV for all symbols (1m, 5m)
+        signal_tf = STRATEGY_CONFIG["signal_timeframe"]
+        trend_tf = STRATEGY_CONFIG["trend_timeframe"]
+
         technical_data = {}
-        ohlcv_cache = {}
         for symbol in self.symbols:
             try:
                 ohlcv_dict = {}
-                for tf in ["1m", "5m"]:  # Skip 15m to save time
-                    ohlcv_dict[tf] = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
+                for tf in [signal_tf, trend_tf]:
+                    ohlcv_dict[tf] = self.exchange.fetch_ohlcv(symbol, tf, limit=250)
                 technical_data[symbol] = self.analyzer.multi_timeframe_analysis(ohlcv_dict, symbol)
-                ohlcv_cache[symbol] = ohlcv_dict
             except Exception as e:
                 logger.error(f"Data fetch error {symbol}: {e}")
 
@@ -199,104 +155,7 @@ class TradingAgent:
             logger.warning("No technical data, skipping cycle")
             return
 
-        # 2. Scalping microstructure (order flow, momentum, spread)
-        scalping_data = {}
-        for symbol, ohlcv_dict in ohlcv_cache.items():
-            if "1m" in ohlcv_dict:
-                scalping_data[symbol] = self.scalping.full_scalping_analysis(ohlcv_dict["1m"])
-
-        # 3. New indicators: Tape Reading, VWAP Bands, Delta Divergence
-        tape_data = {}
-        vwap_data = {}
-        delta_data = {}
-        for symbol, ohlcv_dict in ohlcv_cache.items():
-            if "1m" in ohlcv_dict:
-                df_1m = ohlcv_dict["1m"]
-                tape_data[symbol] = self.tape_reader.analyze(df_1m)
-                vwap_data[symbol] = self.vwap_bands.analyze(df_1m)
-                delta_data[symbol] = self.delta_div.analyze(df_1m)
-
-        # 4. Regime detection (from 5m data)
-        regime_data = {}
-        for symbol, ohlcv_dict in ohlcv_cache.items():
-            if "5m" in ohlcv_dict:
-                regime_data[symbol] = self.regime_detector.detect(ohlcv_dict["5m"])
-
-        # 5. Signal Aggregation (Tier 1-2-3 weighted)
-        aggregated_signals = {}
-        for symbol in self.symbols:
-            if symbol in technical_data and symbol in scalping_data:
-                aggregated_signals[symbol] = self.signal_aggregator.aggregate(
-                    technical_data=technical_data[symbol],
-                    scalping_data=scalping_data.get(symbol, {}),
-                    onchain_data=None,  # Will add onchain in Tier 3
-                    liquidation_data=None,
-                    symbol=symbol,
-                )
-
-        # 6. On-chain data (Tier 3, not blocking)
-        onchain_data = {}
-        try:
-            onchain_data = self.onchain.get_full_onchain_data(self.exchange, self.symbols)
-        except Exception as e:
-            logger.warning(f"On-chain data fetch failed: {e}")
-
-        # 7. Liquidation data (Tier 3)
-        liquidation_data = {}
-        try:
-            liquidation_data = self.liquidations.get_all_liquidations(self.symbols)
-        except Exception as e:
-            logger.warning(f"Liquidation data fetch failed: {e}")
-
-        # 8. Time context
-        time_context_data = self.time_context.get_time_context()
-
-        # 9. Trade history
-        trade_history_data = self.trade_history.get_summary_for_prompt()
-
-        # 10. Trailing stops check
-        if self.mode in ("demo", "live") and self.risk.positions:
-            trailing_updates = self.risk.check_all_trailing_stops(
-                lambda sym: self.exchange.fetch_ticker(sym)["last"]
-            )
-            for update in trailing_updates:
-                logger.info(f"Trailing stop {update['symbol']}: SL {update['old_sl']} -> {update['new_sl']}")
-                self.orders.update_stop_loss(update["symbol"], update["new_sl"])
-
-        # Time-based exit checks
-        for symbol, pos in list(self.risk.positions.items()):
-            age = self.risk.get_position_age_minutes(symbol) or 0
-            try:
-                current_price = self.exchange.fetch_ticker(symbol)["last"]
-                if pos.side == "long":
-                    pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
-                else:
-                    pnl_pct = (pos.entry_price - current_price) / pos.entry_price * 100
-
-                action = self.exit_manager.time_based_exit_check(age, pnl_pct)
-                if action == "close":
-                    logger.info(f"Time-based close: {symbol} (age={age:.0f}m, pnl={pnl_pct:.2f}%)")
-                    if self.mode == "paper":
-                        pnl = self.risk.close_position(symbol, current_price)
-                        self.paper_balance += pnl
-                        self.drawdown.update(pnl, self.paper_balance)
-                    else:
-                        result = self.orders.close_position(symbol)
-                        if result:
-                            self.drawdown.update(result.get("pnl", 0), self.exchange.fetch_usdt_balance())
-                elif action == "tighten" and self.exit_manager.should_move_to_breakeven(
-                    pos.entry_price, current_price, pos.side,
-                    self._get_atr(symbol) or pos.entry_price * 0.003
-                ):
-                    logger.info(f"Moving SL to breakeven: {symbol}")
-                    if self.mode in ("demo", "live"):
-                        self.orders.update_stop_loss(symbol, pos.entry_price)
-                    else:
-                        pos.stop_loss = pos.entry_price
-            except Exception as e:
-                logger.error(f"Time-based exit check failed for {symbol}: {e}")
-
-        # ── ENGINE DECISION (rule-based, no API) ──────────────
+        # ── ENGINE DECISION ──────────────────────────────────
 
         if self.mode in ("demo", "live"):
             balance = self.exchange.fetch_usdt_balance()
@@ -323,16 +182,10 @@ class TradingAgent:
                 "sl_at_breakeven": getattr(pos, "sl_at_breakeven", False),
             }
 
-        # Rule-based engine — instant, free
-        logger.info("Running signal engine...")
+        # Run engine
+        logger.info("Running MACD+EMA200+SR engine...")
         decision = self.engine.decide(
             technical_data=technical_data,
-            scalping_data=scalping_data,
-            tape_data=tape_data,
-            vwap_data=vwap_data,
-            delta_data=delta_data,
-            regime_data=regime_data,
-            onchain_data=onchain_data,
             positions=engine_positions,
             trade_history=self.trade_history.get_recent_trades(20) if hasattr(self.trade_history, 'get_recent_trades') else [],
             daily_pnl=drawdown_status.get("daily_pnl_pct", 0),
@@ -345,52 +198,26 @@ class TradingAgent:
         # ── EXECUTE DECISIONS ────────────────────────────────
 
         min_confidence = self.drawdown.get_min_confidence()
-        size_mult = self.drawdown.get_position_size_multiplier()
 
         actions = decision.get("decisions", [])
         for action in actions:
-            # Apply drawdown-adjusted confidence threshold
             confidence = action.get("confidence", 0)
             if confidence < min_confidence and action.get("action") not in ("hold", "close", "update_sl"):
                 logger.info(f"Skipping {action.get('symbol')} {action.get('action')}: "
                             f"confidence {confidence} < min {min_confidence}")
                 continue
 
-            # Correlation guard check
-            if action.get("action") in ("open_long", "open_short"):
-                symbol = action.get("symbol", "")
-                direction = "long" if action["action"] == "open_long" else "short"
-                open_pos = {s: {"side": p.side} for s, p in self.risk.positions.items()}
-                can_open, reason = self.corr_guard.can_open_position(symbol, direction, open_pos)
-                if not can_open:
-                    logger.info(f"Correlation guard blocked: {reason}")
-                    continue
-
-                # Regime check — skip if choppy
-                regime = regime_data.get(symbol, {})
-                if regime.get("regime") == "choppy":
-                    logger.info(f"Skipping {symbol}: choppy regime")
-                    continue
-
-                # RVOL check
-                tech = technical_data.get(symbol, {}).get("1m", {})
-                rvol = tech.get("rvol", 1.0)
-                if rvol < 0.5:
-                    logger.info(f"Skipping {symbol}: RVOL={rvol:.2f} too low")
-                    continue
-
             self._execute_decision(action, balance)
 
-            # Log decision for analysis
-            self._log_structured_decision(action, aggregated_signals, regime_data)
+            # Log decision
+            self._log_structured_decision(action)
 
     def _execute_decision(self, decision: dict, balance: float):
-        """Execute a single AI trading decision."""
+        """Execute a single trading decision."""
         symbol = decision.get("symbol")
         action = decision.get("action")
         confidence = decision.get("confidence", 0)
         reason = decision.get("reason", "")
-        params = decision.get("params", {})
 
         min_conf = self.drawdown.get_min_confidence()
         if confidence < min_conf and action not in ("hold", "close", "update_sl"):
@@ -411,6 +238,7 @@ class TradingAgent:
         action = decision.get("action")
         confidence = decision.get("confidence", 0)
         reason = decision.get("reason", "")
+        params = decision.get("params", {})
 
         try:
             ticker = self.exchange.fetch_ticker(symbol)
@@ -420,19 +248,19 @@ class TradingAgent:
 
         if action in ("open_long", "open_short"):
             side = "long" if action == "open_long" else "short"
-            atr = self._get_atr(symbol)
 
-            # Dynamic exits based on regime
-            regime = "normal"  # Would come from regime_detector in full cycle
-            exit_plan = self.exit_manager.calculate_exits(price, side, atr, regime)
-            if exit_plan is None:
-                logger.warning(f"[PAPER] Bad R/R for {symbol}, skipping")
-                return
+            # Use SL/TP from engine params
+            stop_loss = params.get("new_stop_loss")
+            if not stop_loss:
+                atr = self._get_atr(symbol)
+                if atr:
+                    stop_loss = price - atr * 1.5 if side == "long" else price + atr * 1.5
+                else:
+                    stop_loss = price * (0.995 if side == "long" else 1.005)
 
-            stop_loss = exit_plan.stop_loss
-            take_profit = exit_plan.take_profit_1
+            sl_distance = abs(price - stop_loss)
+            take_profit = price + sl_distance * STRATEGY_CONFIG["rr_ratio"] if side == "long" else price - sl_distance * STRATEGY_CONFIG["rr_ratio"]
 
-            # Apply drawdown size multiplier
             size_mult = self.drawdown.get_position_size_multiplier()
             amount = self.risk.calculate_position_size(balance, price, stop_loss) * size_mult
 
@@ -442,18 +270,14 @@ class TradingAgent:
                 return
 
             self.risk.register_position(symbol, side, price, amount, stop_loss, take_profit)
-            logger.info(f"[PAPER] {action} {symbol} @ {price} | SL: {stop_loss:.2f} | TP: {take_profit:.2f} | R/R: {exit_plan.risk_reward}")
+            rr = STRATEGY_CONFIG["rr_ratio"]
+            logger.info(f"[PAPER] {action} {symbol} @ {price} | SL: {stop_loss:.2f} | TP: {take_profit:.2f} | R/R: {rr}")
 
         elif action == "close":
             if symbol in self.risk.positions:
                 pnl = self.risk.close_position(symbol, price)
                 self.paper_balance += pnl
                 self.drawdown.update(pnl, self.paper_balance)
-                self.trade_history.record_trade(
-                    symbol=symbol, side=self.risk.positions.get(symbol, type("", (), {"side": ""})()).side if hasattr(self.risk.positions.get(symbol), 'side') else "",
-                    entry_price=price, exit_price=price, amount=0,
-                    reason_close=reason,
-                )
                 logger.info(f"[PAPER] Close {symbol} @ {price} | PnL: {pnl:+.2f} | Balance: {self.paper_balance:.2f}")
 
         elif action == "hold":
@@ -461,7 +285,10 @@ class TradingAgent:
 
         self._save_paper_log()
         msg = self._format_paper_message(action, symbol, price, confidence, reason)
-        self.notifier.send(msg)
+        try:
+            self.notifier.send(msg)
+        except Exception:
+            pass
 
     def _execute_live(self, decision: dict, balance: float):
         """Live/demo trading — place real orders."""
@@ -479,10 +306,9 @@ class TradingAgent:
                 price = ticker["last"]
                 atr = self._get_atr(symbol)
 
-                # Apply drawdown position size multiplier
                 size_mult = self.drawdown.get_position_size_multiplier()
                 if size_mult <= 0:
-                    logger.info(f"Position sizing blocked by drawdown breaker")
+                    logger.info("Position sizing blocked by drawdown breaker")
                     return
 
                 side = "long" if action == "open_long" else "short"
@@ -518,39 +344,37 @@ class TradingAgent:
 
             if result:
                 msg = self._format_trade_message(action, symbol, confidence, reason, result)
-                self.notifier.send(msg)
+                try:
+                    self.notifier.send(msg)
+                except Exception:
+                    pass
                 logger.info(f"Executed: {result}")
 
         except Exception as e:
             logger.error(f"Execution error {action} {symbol}: {e}")
-            self.notifier.send(f"\u274C <b>ERROR</b> {action} {symbol}: {e}")
+            try:
+                self.notifier.send(f"\u274C <b>ERROR</b> {action} {symbol}: {e}")
+            except Exception:
+                pass
 
-    def _log_structured_decision(self, decision: dict, aggregated_signals: dict, regime_data: dict):
+    def _log_structured_decision(self, decision: dict):
         """Log structured decision for post-analysis."""
-        symbol = decision.get("symbol", "")
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": symbol,
+            "symbol": decision.get("symbol", ""),
             "action": decision.get("action"),
             "confidence": decision.get("confidence"),
             "reason": decision.get("reason"),
-            "regime": regime_data.get(symbol, {}).get("regime", "unknown"),
-            "signal_score": aggregated_signals.get(symbol, {}).get("weighted_score", 0),
-            "tier1_conflict": aggregated_signals.get(symbol, {}).get("tier1_conflict", False),
-            "result_pnl": None,  # Filled after close
+            "result_pnl": None,
         }
         self._decision_log.append(entry)
 
-        # Persist every 10 decisions
         if len(self._decision_log) % 10 == 0:
             self._save_decision_log()
 
     def _save_decision_log(self):
-        """Save structured decision log."""
         log_file = Path("data/decision_log.json")
         log_file.write_text(json.dumps(self._decision_log[-500:], indent=1, ensure_ascii=False))
-
-    # ── Telegram message formatting ──────────────────────────
 
     @staticmethod
     def _action_emoji(action: str) -> str:
@@ -592,9 +416,9 @@ class TradingAgent:
         return f"\U0001F4DD [PAPER] {emoji} <b>{label}</b> {coin} @ {price} | conf={confidence:.0%}\n{reason}"
 
     def _get_atr(self, symbol: str) -> float | None:
-        """Get latest ATR value for a symbol (5m)."""
+        """Get latest ATR value for a symbol."""
         try:
-            df = self.exchange.fetch_ohlcv(symbol, "5m", limit=50)
+            df = self.exchange.fetch_ohlcv(symbol, STRATEGY_CONFIG["signal_timeframe"], limit=50)
             df_analyzed = self.analyzer.compute_indicators(df)
             return float(df_analyzed["atr"].iloc[-1])
         except Exception:
@@ -611,38 +435,17 @@ class TradingAgent:
         }
         log_file.write_text(json.dumps(data, indent=2))
 
-    def _get_adaptive_interval(self) -> int:
-        """Adaptive cycle interval based on market volatility.
-
-        High volatility → faster cycles (60s)
-        Low volatility → slower cycles (300s)
-        Normal → 120s
-        """
-        try:
-            df = self.exchange.fetch_ohlcv(self.symbols[0], "5m", limit=30)
-            if len(df) < 20:
-                return 120
-
-            from analysis.scalping import ScalpingAnalyzer
-            vr = ScalpingAnalyzer.volatility_micro_regime(df)
-            atr_ratio = vr.get("atr_ratio", 1.0)
-
-            if atr_ratio > 1.5:
-                return 60   # High volatility — faster
-            elif atr_ratio < 0.5:
-                return 300  # Dead market — slower
-            else:
-                return 120  # Normal
-        except Exception:
-            return 120
-
     def run(self, once: bool = False):
-        """Main loop — no pauses, continuous analysis."""
-        self.notifier.send(
-            f"\U0001F680 <b>Trading Agent v4.0 STARTED (rule-based)</b>\n"
-            f"Mode: <b>{self.mode.upper()}</b>\n"
-            f"Symbols: {', '.join(self.symbols)}"
-        )
+        """Main loop — continuous analysis."""
+        try:
+            self.notifier.send(
+                f"\U0001F680 <b>Trading Agent v5.0 STARTED (MACD+EMA200+SR)</b>\n"
+                f"Mode: <b>{self.mode.upper()}</b>\n"
+                f"Symbols: {', '.join(self.symbols)}\n"
+                f"Signal TF: {STRATEGY_CONFIG['signal_timeframe']}, Trend TF: {STRATEGY_CONFIG['trend_timeframe']}"
+            )
+        except Exception:
+            pass
 
         if once:
             self.run_cycle()
@@ -665,11 +468,11 @@ class TradingAgent:
                     self.notifier.send(f"\u274C <b>CYCLE ERROR</b>\n{e}")
                 except Exception:
                     pass
-                time.sleep(5)  # only pause on error to avoid spam
+                time.sleep(5)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AI Trading Agent v3.0")
+    parser = argparse.ArgumentParser(description="Trading Agent v5.0 — MACD + EMA200 + S/R")
     parser.add_argument("--live", action="store_true", help="Live trading mode")
     parser.add_argument("--once", action="store_true", help="Run one cycle")
     args = parser.parse_args()

@@ -1,9 +1,12 @@
 """
-Deterministic Signal Engine — replaces Claude API.
+MACD + 200 EMA + Support/Resistance Strategy Engine.
 
-Same inputs, same output format, zero cost, zero latency.
-Cascade of filters: each can REJECT but not APPROVE alone.
-Entry requires ALL gates passed + minimum score.
+Simple, deterministic, 3-component strategy:
+1. MACD(12,26,9) crossover for entry signal
+2. 200 EMA as trend filter (longs above, shorts below)
+3. S/R levels for confirmation
+
+No AI, no complex scoring — just clean rules.
 """
 
 import json
@@ -16,7 +19,7 @@ from typing import Optional
 
 from loguru import logger
 
-from engine.config import ENGINE_CONFIG
+from engine.config import STRATEGY_CONFIG
 
 
 # ═══════════════════════════════════════════════════════════
@@ -32,9 +35,7 @@ class Action(Enum):
 
 
 class TradeType(Enum):
-    MOMENTUM = "momentum"
-    REVERSAL = "reversal"
-    BREAKOUT = "breakout"
+    MACD_TREND = "macd_trend"
 
 
 @dataclass
@@ -52,7 +53,7 @@ class Decision:
     signals: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        """Convert to the same dict format brain.py returned."""
+        """Convert to the same dict format main.py expects."""
         return {
             "symbol": self.symbol,
             "action": self.action.value,
@@ -63,414 +64,6 @@ class Decision:
                 "new_stop_loss": self.stop_loss,
             },
         }
-
-
-# ═══════════════════════════════════════════════════════════
-# GateKeeper — fast reject filters
-# ═══════════════════════════════════════════════════════════
-
-class GateKeeper:
-    """Mandatory pre-entry checks. Any failure = HOLD."""
-
-    def __init__(self, cfg: dict):
-        self.cfg = cfg
-        self._symbol_losses: dict[str, list[float]] = {}  # symbol -> list of loss timestamps
-
-    def check_all(self, symbol: str, scalping: dict, technical_1m: dict,
-                  regime: dict, positions: dict, risk_level: str) -> tuple[bool, str]:
-        checks = [
-            self._check_spread(scalping),
-            self._check_volume(technical_1m),
-            self._check_regime(regime),
-            self._check_max_positions(positions),
-            self._check_symbol_cooldown(symbol),
-        ]
-        for passed, reason in checks:
-            if not passed:
-                return False, reason
-        return True, "all gates passed"
-
-    def record_loss(self, symbol: str):
-        """Record a loss for symbol cooldown tracking."""
-        self._symbol_losses.setdefault(symbol, [])
-        self._symbol_losses[symbol].append(time.time())
-        # Keep only last hour
-        cutoff = time.time() - 3600
-        self._symbol_losses[symbol] = [t for t in self._symbol_losses[symbol] if t > cutoff]
-
-    def _check_spread(self, scalping: dict) -> tuple[bool, str]:
-        spread = scalping.get("spread_estimate", {})
-        spread_pct = spread.get("spread_pct", 0)
-        if spread_pct > self.cfg["max_spread_pct"]:
-            return False, f"spread too wide: {spread_pct:.3f}%"
-        return True, "spread ok"
-
-    def _check_volume(self, technical_1m: dict) -> tuple[bool, str]:
-        rvol = technical_1m.get("rvol", technical_1m.get("volume_ratio", 1.0))
-        if rvol < self.cfg["min_volume_ratio"]:
-            return False, f"volume too low: rvol={rvol:.2f}"
-        return True, "volume ok"
-
-    def _check_regime(self, regime: dict) -> tuple[bool, str]:
-        if regime.get("regime") == "choppy":
-            return False, "choppy market regime"
-        return True, f"regime ok: {regime.get('regime', 'unknown')}"
-
-    def _check_max_positions(self, positions: dict) -> tuple[bool, str]:
-        if len(positions) >= self.cfg["max_positions"]:
-            return False, f"max positions reached: {len(positions)}"
-        return True, "positions ok"
-
-    def _check_symbol_cooldown(self, symbol: str) -> tuple[bool, str]:
-        losses = self._symbol_losses.get(symbol, [])
-        cooldown = self.cfg["symbol_cooldown_minutes"] * 60
-        recent = [t for t in losses if time.time() - t < cooldown]
-        if len(recent) >= 2:
-            return False, f"symbol cooldown: {len(recent)} recent losses"
-        return True, "no cooldown"
-
-
-# ═══════════════════════════════════════════════════════════
-# SignalScorer — numerical scoring replaces Claude "intuition"
-# ═══════════════════════════════════════════════════════════
-
-class SignalScorer:
-    """
-    Computes entry score from -10 to +10.
-    Positive = long, negative = short.
-    |score| < 3.0 = no trade.
-    """
-
-    def __init__(self, cfg: dict):
-        self.T1 = cfg["tier1_weight"]
-        self.T2 = cfg["tier2_weight"]
-        self.T3 = cfg["tier3_weight"]
-
-    def score(self, scalping: dict, technical_1m: dict, technical_5m: dict,
-              tape: dict, vwap: dict, delta: dict, onchain: dict,
-              regime: dict) -> dict:
-        signals = {}
-        total = 0.0
-
-        # ══ TIER 1 (weight 3x) ══
-        of = self._score_order_flow(scalping)
-        signals["order_flow"] = of
-        total += of["score"] * self.T1
-
-        cvd = self._score_cvd(delta)
-        signals["cvd"] = cvd
-        total += cvd["score"] * self.T1
-
-        mom = self._score_momentum(scalping)
-        signals["momentum"] = mom
-        total += mom["score"] * self.T1
-
-        # Tier 1 conflict check
-        dirs = [s["direction"] for s in [of, cvd, mom] if s["direction"] != "neutral"]
-        if len(set(dirs)) > 1:
-            return {
-                "direction": "neutral", "score": 0, "confidence": 0,
-                "trade_type": None, "signals": signals,
-                "conflicts": ["tier1_conflict"],
-            }
-
-        # ══ TIER 2 (weight 2x) ══
-        ema = self._score_ema(technical_1m)
-        signals["ema"] = ema
-        total += ema["score"] * self.T2
-
-        tape_s = self._score_tape(tape)
-        signals["tape"] = tape_s
-        total += tape_s["score"] * self.T2
-
-        pa = self._score_price_action(scalping)
-        signals["price_action"] = pa
-        total += pa["score"] * self.T2
-
-        vwap_s = self._score_vwap(vwap)
-        signals["vwap"] = vwap_s
-        total += vwap_s["score"] * self.T2
-
-        # ══ TIER 3 (weight 1x) ══
-        funding = self._score_funding(onchain)
-        signals["funding"] = funding
-        total += funding["score"] * self.T3
-
-        regime_s = self._score_regime_boost(regime)
-        signals["regime"] = regime_s
-        total += regime_s["score"] * self.T3
-
-        # Scalp aggregate as tiebreaker
-        scalp_agg = self._score_scalp_aggregate(scalping)
-        signals["scalp_aggregate"] = scalp_agg
-        total += scalp_agg["score"] * self.T3
-
-        # ══ Result ══
-        direction = "long" if total > 0 else "short" if total < 0 else "neutral"
-        abs_score = abs(total)
-        confidence = min(abs_score / 10.0, 1.0)
-
-        trade_type = self._determine_trade_type(signals, regime)
-
-        return {
-            "direction": direction,
-            "score": abs_score,
-            "confidence": confidence,
-            "trade_type": trade_type,
-            "signals": signals,
-            "conflicts": [],
-        }
-
-    # ── Tier 1 scorers ──
-
-    def _score_order_flow(self, scalping: dict) -> dict:
-        of = scalping.get("order_flow", {})
-        value = of.get("imbalance", 0)
-        if abs(value) < 0.3:
-            return {"score": 0, "direction": "neutral", "detail": f"imbalance={value:.2f}"}
-        score = value * min(abs(value) * 1.5, 1.0)
-        return {"score": score, "direction": "long" if value > 0 else "short",
-                "detail": f"imbalance={value:.2f}"}
-
-    def _score_cvd(self, delta: dict) -> dict:
-        verdict = delta.get("delta_verdict", {}).get("signal", "neutral")
-        stacked = delta.get("stacked_delta", {})
-        exhaustion = delta.get("exhaustion", {}).get("signal", "none")
-
-        if exhaustion == "bullish_exhaustion":
-            return {"score": -0.7, "direction": "short", "detail": "bullish exhaustion (reversal short)"}
-        if exhaustion == "bearish_exhaustion":
-            return {"score": 0.7, "direction": "long", "detail": "bearish exhaustion (reversal long)"}
-
-        if verdict == "strong_bullish":
-            return {"score": 0.6, "direction": "long", "detail": "strong bullish delta"}
-        if verdict == "strong_bearish":
-            return {"score": -0.6, "direction": "short", "detail": "strong bearish delta"}
-
-        stacked_sig = stacked.get("signal", "neutral")
-        if "buying" in stacked_sig:
-            return {"score": 0.3, "direction": "long", "detail": stacked_sig}
-        if "selling" in stacked_sig:
-            return {"score": -0.3, "direction": "short", "detail": stacked_sig}
-
-        return {"score": 0, "direction": "neutral", "detail": "delta neutral"}
-
-    def _score_momentum(self, scalping: dict) -> dict:
-        mm = scalping.get("micro_momentum", {})
-        signal = mm.get("signal", "neutral")
-        vol_factor = mm.get("volume_factor", 1.0)
-
-        if signal == "strong_bullish_burst" and vol_factor > 1.2:
-            return {"score": 0.9, "direction": "long", "detail": f"bull burst vol={vol_factor:.1f}x"}
-        if signal == "strong_bearish_burst" and vol_factor > 1.2:
-            return {"score": -0.9, "direction": "short", "detail": f"bear burst vol={vol_factor:.1f}x"}
-        if signal in ("bullish_burst", "bullish_momentum"):
-            return {"score": 0.4, "direction": "long", "detail": signal}
-        if signal in ("bearish_burst", "bearish_momentum"):
-            return {"score": -0.4, "direction": "short", "detail": signal}
-        return {"score": 0, "direction": "neutral", "detail": "no momentum"}
-
-    # ── Tier 2 scorers ──
-
-    def _score_ema(self, tech: dict) -> dict:
-        trend = tech.get("scalp_trend", "mixed")
-        if trend == "bullish":
-            return {"score": 0.6, "direction": "long", "detail": "EMA bullish"}
-        if trend == "bearish":
-            return {"score": -0.6, "direction": "short", "detail": "EMA bearish"}
-        return {"score": 0, "direction": "neutral", "detail": "EMA mixed"}
-
-    def _score_tape(self, tape: dict) -> dict:
-        verdict = tape.get("tape_verdict", {})
-        sig = verdict.get("signal", "neutral")
-        score_val = verdict.get("score", 0)
-
-        if sig == "dead_market":
-            return {"score": 0, "direction": "neutral", "detail": "dead market"}
-        if sig in ("strong_bullish", "bullish"):
-            return {"score": min(score_val * 0.25, 0.7), "direction": "long", "detail": sig}
-        if sig in ("strong_bearish", "bearish"):
-            return {"score": max(score_val * 0.25, -0.7), "direction": "short", "detail": sig}
-        return {"score": 0, "direction": "neutral", "detail": sig}
-
-    def _score_price_action(self, scalping: dict) -> dict:
-        pa = scalping.get("price_action", {})
-        patterns = pa.get("patterns", [])
-        score = 0.0
-        details = []
-        for p in patterns:
-            ptype = p.get("type", "")
-            strength = p.get("strength", 0.5)
-            if "bullish" in ptype:
-                score += strength * 0.5
-                details.append(ptype)
-            elif "bearish" in ptype:
-                score -= strength * 0.5
-                details.append(ptype)
-        score = max(min(score, 1.0), -1.0)
-        direction = "long" if score > 0 else "short" if score < 0 else "neutral"
-        return {"score": score, "direction": direction, "detail": ", ".join(details[:3]) or "none"}
-
-    def _score_vwap(self, vwap: dict) -> dict:
-        sig = vwap.get("signal", "neutral")
-        dev = vwap.get("deviation_sigma", 0)
-
-        if sig == "breakout_long":
-            return {"score": 0.6, "direction": "long", "detail": f"VWAP breakout long {dev:.1f}σ"}
-        if sig == "breakout_short":
-            return {"score": -0.6, "direction": "short", "detail": f"VWAP breakout short {dev:.1f}σ"}
-        if sig == "mean_revert_long":
-            return {"score": 0.4, "direction": "long", "detail": f"VWAP revert long {dev:.1f}σ"}
-        if sig == "mean_revert_short":
-            return {"score": -0.4, "direction": "short", "detail": f"VWAP revert short {dev:.1f}σ"}
-        return {"score": 0, "direction": "neutral", "detail": sig}
-
-    # ── Tier 3 scorers ──
-
-    def _score_funding(self, onchain: dict) -> dict:
-        funding = onchain.get("funding_rate", {})
-        rate = funding.get("funding_rate", 0)
-        if rate > 0.01:
-            return {"score": -0.3, "direction": "short", "detail": f"high funding={rate:.4f}"}
-        if rate < -0.01:
-            return {"score": 0.3, "direction": "long", "detail": f"neg funding={rate:.4f}"}
-        return {"score": 0, "direction": "neutral", "detail": f"funding={rate:.4f}"}
-
-    def _score_regime_boost(self, regime: dict) -> dict:
-        r = regime.get("regime", "normal")
-        if r == "strong_trend":
-            return {"score": 0.3, "direction": "neutral", "detail": "trend boost"}
-        if r == "squeeze":
-            return {"score": 0.2, "direction": "neutral", "detail": "squeeze boost"}
-        if r == "fading_trend":
-            return {"score": -0.2, "direction": "neutral", "detail": "fading penalty"}
-        return {"score": 0, "direction": "neutral", "detail": r}
-
-    def _score_scalp_aggregate(self, scalping: dict) -> dict:
-        agg = scalping.get("scalp_signal", {})
-        score_val = agg.get("score", 0)  # -5 to +5
-        normalized = score_val / 5.0  # -1 to +1
-        direction = "long" if normalized > 0 else "short" if normalized < 0 else "neutral"
-        return {"score": normalized * 0.5, "direction": direction,
-                "detail": f"scalp_agg={score_val}"}
-
-    def _determine_trade_type(self, signals: dict, regime: dict) -> TradeType:
-        r = regime.get("regime", "normal")
-        if r == "squeeze":
-            return TradeType.BREAKOUT
-
-        cvd = signals.get("cvd", {})
-        if "exhaustion" in cvd.get("detail", ""):
-            return TradeType.REVERSAL
-
-        return TradeType.MOMENTUM
-
-
-# ═══════════════════════════════════════════════════════════
-# ExitManager — SL/TP based on trade type + regime
-# ═══════════════════════════════════════════════════════════
-
-class ExitManager:
-    """Calculates SL/TP based on trade type and regime."""
-
-    def __init__(self, cfg: dict):
-        self.cfg = cfg
-
-    def calculate(self, entry_price: float, direction: str,
-                  trade_type: TradeType, regime: str, atr: float) -> dict | None:
-        if atr is None or atr <= 0:
-            atr = entry_price * 0.003  # fallback 0.3%
-
-        if trade_type == TradeType.MOMENTUM:
-            if regime == "strong_trend":
-                sl_dist, tp1_dist, tp2_dist, trailing = 1.0 * atr, 1.5 * atr, 4.0 * atr, 0.4 * atr
-            else:
-                sl_dist, tp1_dist, tp2_dist, trailing = 1.2 * atr, 1.5 * atr, 3.0 * atr, 0.3 * atr
-        elif trade_type == TradeType.REVERSAL:
-            sl_dist, tp1_dist, tp2_dist, trailing = 1.5 * atr, 1.0 * atr, 2.0 * atr, None
-        elif trade_type == TradeType.BREAKOUT:
-            sl_dist, tp1_dist, tp2_dist, trailing = 1.5 * atr, 2.0 * atr, 5.0 * atr, 0.5 * atr
-        else:
-            sl_dist, tp1_dist, tp2_dist, trailing = 1.2 * atr, 1.5 * atr, 3.0 * atr, 0.3 * atr
-
-        if direction == "long":
-            sl = entry_price - sl_dist
-            tp1 = entry_price + tp1_dist
-            tp2 = entry_price + tp2_dist
-        else:
-            sl = entry_price + sl_dist
-            tp1 = entry_price - tp1_dist
-            tp2 = entry_price - tp2_dist
-
-        risk = abs(entry_price - sl)
-        reward = abs(tp1 - entry_price)
-        if risk == 0 or reward / risk < 1.2:
-            return None
-
-        return {
-            "stop_loss": sl,
-            "take_profit_1": tp1,
-            "take_profit_2": tp2,
-            "trailing_stop": trailing,
-            "risk_reward": round(reward / risk, 2),
-        }
-
-
-# ═══════════════════════════════════════════════════════════
-# PositionManager — manage open positions each cycle
-# ═══════════════════════════════════════════════════════════
-
-class PositionManager:
-    """Evaluates open positions for exit/update."""
-
-    def __init__(self, cfg: dict):
-        self.cfg = cfg
-
-    def evaluate(self, symbol: str, position: dict,
-                 technical_1m: dict, regime: dict) -> Decision | None:
-        entry_price = position.get("entry_price", 0)
-        direction = position.get("side", position.get("direction", "long"))
-        current_price = technical_1m.get("price", entry_price)
-        age_minutes = position.get("age_minutes", 0)
-
-        if entry_price <= 0:
-            return None
-
-        if direction == "long":
-            pnl_pct = (current_price - entry_price) / entry_price * 100
-        else:
-            pnl_pct = (entry_price - current_price) / entry_price * 100
-
-        # 1. Regime changed to choppy
-        if regime.get("regime") == "choppy":
-            return Decision(Action.CLOSE, symbol, 0.9, reason=f"regime choppy, pnl={pnl_pct:.2f}%")
-
-        # 2. Max time
-        if age_minutes > self.cfg["max_trade_minutes"]:
-            return Decision(Action.CLOSE, symbol, 0.9, reason=f"max time {age_minutes:.0f}min")
-
-        # 3. Dead trade
-        if abs(pnl_pct) < 0.1 and age_minutes > self.cfg["dead_trade_minutes"]:
-            return Decision(Action.CLOSE, symbol, 0.8, reason=f"dead trade {age_minutes:.0f}min")
-
-        # 4. Losing + trend against
-        if pnl_pct < -0.2 and age_minutes > self.cfg["losing_trade_minutes"]:
-            trend = technical_1m.get("scalp_trend", "mixed")
-            our_direction = (direction == "long" and trend == "bullish") or \
-                           (direction == "short" and trend == "bearish")
-            if not our_direction:
-                return Decision(Action.CLOSE, symbol, 0.85,
-                              reason=f"losing+trend against: pnl={pnl_pct:.2f}%")
-
-        # 5. Move SL to breakeven
-        if pnl_pct > self.cfg["breakeven_pnl_pct"] and not position.get("sl_at_breakeven"):
-            commission = entry_price * 0.0006
-            new_sl = entry_price + commission if direction == "long" else entry_price - commission
-            return Decision(Action.UPDATE_SL, symbol, 0.9, stop_loss=new_sl,
-                          reason=f"SL to breakeven, pnl={pnl_pct:.2f}%",
-                          signals={"sl_at_breakeven": True})
-
-        return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -516,64 +109,6 @@ class RiskThrottle:
 
 
 # ═══════════════════════════════════════════════════════════
-# CorrelationFilter — prevent correlated positions
-# ═══════════════════════════════════════════════════════════
-
-class CorrelationFilter:
-    """Prevents over-concentrated correlated positions."""
-
-    HIGH_CORR_GROUPS = [
-        {"BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT",
-         "AVAX/USDT:USDT", "DOT/USDT:USDT", "ADA/USDT:USDT", "NEAR/USDT:USDT"},
-        {"ARB/USDT:USDT", "OP/USDT:USDT", "MATIC/USDT:USDT"},
-        {"DOGE/USDT:USDT", "PEPE/USDT:USDT", "WIF/USDT:USDT", "SHIB/USDT:USDT", "FLOKI/USDT:USDT"},
-        {"FET/USDT:USDT", "RENDER/USDT:USDT", "TAO/USDT:USDT"},
-        {"UNI/USDT:USDT", "AAVE/USDT:USDT", "LINK/USDT:USDT"},
-        {"SUI/USDT:USDT", "APT/USDT:USDT"},
-    ]
-
-    def filter(self, decisions: list[Decision], positions: dict) -> list[Decision]:
-        filtered = []
-        for d in decisions:
-            if d.action not in (Action.OPEN_LONG, Action.OPEN_SHORT):
-                filtered.append(d)
-                continue
-
-            direction = "long" if d.action == Action.OPEN_LONG else "short"
-            group = self._find_group(d.symbol)
-            if group is None:
-                filtered.append(d)
-                continue
-
-            blocked = False
-            # Check existing positions
-            for sym in group:
-                if sym in positions and sym != d.symbol:
-                    if positions[sym].get("side", positions[sym].get("direction")) == direction:
-                        blocked = True
-                        break
-            # Check already-approved decisions this cycle
-            if not blocked:
-                for approved in filtered:
-                    if approved.action in (Action.OPEN_LONG, Action.OPEN_SHORT) and approved.symbol in group:
-                        a_dir = "long" if approved.action == Action.OPEN_LONG else "short"
-                        if a_dir == direction:
-                            blocked = True
-                            break
-
-            if not blocked:
-                filtered.append(d)
-
-        return filtered
-
-    def _find_group(self, symbol: str) -> set | None:
-        for g in self.HIGH_CORR_GROUPS:
-            if symbol in g:
-                return g
-        return None
-
-
-# ═══════════════════════════════════════════════════════════
 # DecisionLogger
 # ═══════════════════════════════════════════════════════════
 
@@ -584,16 +119,14 @@ class DecisionLogger:
         Path("logs/decisions").mkdir(parents=True, exist_ok=True)
         self._file = Path("logs/decisions") / f"decisions_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
 
-    def log(self, decision: Decision, regime: str = "unknown"):
+    def log(self, decision: Decision):
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": decision.symbol,
             "action": decision.action.value,
             "confidence": decision.confidence,
-            "trade_type": decision.trade_type.value if decision.trade_type else None,
             "reason": decision.reason,
             "signals": decision.signals,
-            "regime": regime,
             "sl": decision.stop_loss,
             "tp": decision.take_profit,
         }
@@ -602,34 +135,31 @@ class DecisionLogger:
 
 
 # ═══════════════════════════════════════════════════════════
-# SignalEngine — main entry point (replaces TradingBrain)
+# MACDStrategyEngine — main entry point
 # ═══════════════════════════════════════════════════════════
 
 class SignalEngine:
     """
-    Deterministic replacement for Claude API.
-    Same interface: receives market data, returns decisions dict.
+    MACD + 200 EMA + S/R strategy engine.
+
+    Entry rules:
+    - LONG: MACD crosses above signal BELOW zero + price above EMA 200 + near support
+    - SHORT: MACD crosses below signal ABOVE zero + price below EMA 200 + near resistance
+
+    Exit rules:
+    - SL behind EMA 200 with ATR buffer
+    - TP = 1.5x SL distance
     """
 
     def __init__(self, cfg: dict | None = None):
-        self.cfg = cfg or ENGINE_CONFIG
-        self.gate_keeper = GateKeeper(self.cfg)
-        self.signal_scorer = SignalScorer(self.cfg)
-        self.exit_manager = ExitManager(self.cfg)
-        self.position_manager = PositionManager(self.cfg)
-        self.correlation_filter = CorrelationFilter()
+        self.cfg = cfg or STRATEGY_CONFIG
         self.risk_throttle = RiskThrottle(self.cfg)
-        self.logger = DecisionLogger()
+        self.decision_logger = DecisionLogger()
+        self._symbol_losses: dict[str, list[float]] = {}
 
     def decide(
         self,
         technical_data: dict,
-        scalping_data: dict,
-        tape_data: dict,
-        vwap_data: dict,
-        delta_data: dict,
-        regime_data: dict,
-        onchain_data: dict,
         positions: dict,
         trade_history: list,
         daily_pnl: float,
@@ -637,7 +167,7 @@ class SignalEngine:
     ) -> dict:
         """
         Main method. Called every cycle.
-        Returns dict in the same format as brain.analyze_and_decide().
+        Returns dict compatible with main.py execution flow.
         """
         decisions = []
 
@@ -654,158 +184,259 @@ class SignalEngine:
 
         # 1. Manage existing positions
         for symbol, pos in positions.items():
-            tech_1m = technical_data.get(symbol, {}).get("1m", {})
-            regime = regime_data.get(symbol, {})
-            pos_decision = self.position_manager.evaluate(symbol, pos, tech_1m, regime)
+            tech_signal = technical_data.get(symbol, {}).get(self.cfg["signal_timeframe"], {})
+            pos_decision = self._manage_position(symbol, pos, tech_signal)
             if pos_decision:
                 decisions.append(pos_decision)
 
         # 2. Evaluate new entries
-        min_score = self.cfg["min_score"]
         min_conf = self.cfg["min_confidence"]
         adjusted_size, adjusted_conf = self.risk_throttle.adjust_params(
             risk_level, self.cfg["base_position_pct"], min_conf
         )
 
-        logger.info(f"Engine: risk_level={risk_level}, min_score={min_score}, min_conf={adjusted_conf:.2f}")
+        logger.info(f"Engine: risk_level={risk_level}, min_conf={adjusted_conf:.2f}")
 
         entry_decisions = []
-        gate_blocked = 0
-        conflict_blocked = 0
-        score_blocked = 0
-        rr_blocked = 0
-
         for symbol in symbols:
             if symbol in positions:
                 logger.debug(f"  {symbol}: SKIP (has open position)")
                 continue
 
-            scalping = scalping_data.get(symbol, {})
-            tech_1m = technical_data.get(symbol, {}).get("1m", {})
-            tech_5m = technical_data.get(symbol, {}).get("5m", {})
-            tape = tape_data.get(symbol, {})
-            vwap = vwap_data.get(symbol, {})
-            delta_d = delta_data.get(symbol, {})
-            regime = regime_data.get(symbol, {})
-            onchain = onchain_data.get(symbol, {})
+            # Cooldown check
+            if self._is_on_cooldown(symbol):
+                coin = symbol.replace("/USDT:USDT", "")
+                logger.info(f"  {coin}: COOLDOWN — recent losses")
+                continue
 
-            coin = symbol.replace("/USDT:USDT", "")
+            # Max positions check
+            total_open = len(positions) + len(entry_decisions)
+            if total_open >= self.cfg["max_positions"]:
+                logger.info("  Max positions reached, skipping remaining")
+                break
 
-            if not scalping or not tech_1m:
+            tech_signal = technical_data.get(symbol, {}).get(self.cfg["signal_timeframe"], {})
+            tech_trend = technical_data.get(symbol, {}).get(self.cfg["trend_timeframe"], {})
+
+            if not tech_signal or not tech_trend:
+                coin = symbol.replace("/USDT:USDT", "")
                 logger.warning(f"  {coin}: SKIP (no data)")
                 continue
 
-            # Gate check
-            passed, reason = self.gate_keeper.check_all(
-                symbol, scalping, tech_1m, regime, positions, risk_level
-            )
-            if not passed:
-                logger.info(f"  {coin}: GATE BLOCKED — {reason}")
-                gate_blocked += 1
-                continue
-
-            # Score
-            result = self.signal_scorer.score(
-                scalping, tech_1m, tech_5m or {},
-                tape, vwap, delta_d, onchain, regime
-            )
-
-            if result["conflicts"]:
-                logger.info(f"  {coin}: TIER1 CONFLICT — signals disagree, no entry")
-                conflict_blocked += 1
-                continue
-
-            # Log scoring details for every symbol
-            direction = result["direction"]
-            score_val = result["score"]
-            conf = result["confidence"]
-
-            # Collect non-zero signal details
-            sig_parts = []
-            for name, sig in result["signals"].items():
-                s = sig.get("score", 0)
-                if s != 0:
-                    sig_parts.append(f"{name}={s:+.2f}")
-
-            regime_name = regime.get("regime", "?")
-            logger.info(f"  {coin}: {direction.upper()} score={score_val:.1f} conf={conf:.0%} "
-                        f"regime={regime_name} | {', '.join(sig_parts)}")
-
-            if score_val < min_score or conf < adjusted_conf:
-                logger.info(f"  {coin}: SKIP — score {score_val:.1f}<{min_score} or conf {conf:.2f}<{adjusted_conf:.2f}")
-                score_blocked += 1
-                continue
-
-            # Calculate exits
-            trade_type = result["trade_type"] or TradeType.MOMENTUM
-            price = tech_1m.get("price", 0)
-            atr = tech_1m.get("atr", price * 0.003 if price > 0 else None)
-
-            exits = self.exit_manager.calculate(price, direction, trade_type, regime_name, atr)
-            if exits is None:
-                logger.info(f"  {coin}: SKIP — bad R/R ratio")
-                rr_blocked += 1
-                continue
-
-            action = Action.OPEN_LONG if direction == "long" else Action.OPEN_SHORT
-
-            # Build reason string
-            top_signals = sorted(
-                result["signals"].items(),
-                key=lambda x: abs(x[1].get("score", 0)),
-                reverse=True
-            )[:3]
-            reason_parts = [f"{k}:{v['detail']}" for k, v in top_signals if v.get("score", 0) != 0]
-
-            d = Decision(
-                action=action,
-                symbol=symbol,
-                confidence=conf,
-                trade_type=trade_type,
-                stop_loss=exits["stop_loss"],
-                take_profit=exits["take_profit_1"],
-                tp2=exits["take_profit_2"],
-                trailing_stop=exits["trailing_stop"],
-                position_size_pct=adjusted_size,
-                reason=f"[{trade_type.value}] {'; '.join(reason_parts)}",
-                signals=result["signals"],
-            )
-            entry_decisions.append(d)
-            logger.info(f"  {coin}: >>> ENTRY SIGNAL <<< {action.value} conf={conf:.0%} "
-                        f"SL={exits['stop_loss']:.4f} TP={exits['take_profit_1']:.4f} "
-                        f"R/R={exits['risk_reward']}")
-
-        # Summary
-        logger.info(f"Engine summary: {len(entry_decisions)} entries, "
-                     f"{gate_blocked} gate-blocked, {conflict_blocked} conflicts, "
-                     f"{score_blocked} weak-score, {rr_blocked} bad-RR")
-
-        # 3. Sort by confidence, take best
-        entry_decisions.sort(key=lambda x: x.confidence, reverse=True)
-
-        # 4. Correlation filter
-        before_corr = len(entry_decisions)
-        entry_decisions = self.correlation_filter.filter(entry_decisions, positions)
-        if before_corr > len(entry_decisions):
-            logger.info(f"Correlation filter: {before_corr} -> {len(entry_decisions)} (removed correlated)")
+            entry = self._check_entry(symbol, tech_signal, tech_trend, adjusted_conf)
+            if entry:
+                entry.position_size_pct = adjusted_size
+                entry_decisions.append(entry)
 
         decisions.extend(entry_decisions)
 
-        # 5. Log all
+        # 3. Log all
         for d in decisions:
-            regime_name = regime_data.get(d.symbol, {}).get("regime", "unknown")
-            self.logger.log(d, regime_name)
+            self.decision_logger.log(d)
 
-        # 6. Convert to brain.py format
+        # 4. Convert to main.py format
         decision_dicts = [d.to_dict() for d in decisions]
 
-        # Market outlook
-        regimes = [r.get("regime", "?") for r in regime_data.values()]
-        outlook = f"Rule-based engine | {len(decision_dicts)} decisions | " \
-                  f"regimes: {', '.join(set(regimes))}"
+        outlook = f"MACD+EMA200+SR engine | {len(decision_dicts)} decisions"
 
         return {
             "decisions": decision_dicts,
             "market_outlook": outlook,
             "risk_level": risk_level if risk_level != "normal" else "low",
         }
+
+    def _check_entry(self, symbol: str, tech_signal: dict, tech_trend: dict,
+                     min_confidence: float) -> Decision | None:
+        """Check MACD + EMA 200 + S/R entry conditions."""
+        coin = symbol.replace("/USDT:USDT", "")
+        price = tech_signal.get("price", 0)
+        if price <= 0:
+            return None
+
+        # ── Component 1: MACD crossover ──
+        macd = tech_signal.get("macd", {})
+        macd_line = macd.get("macd_line", 0)
+        signal_line = macd.get("signal_line", 0)
+        prev_macd = macd.get("prev_macd_line", 0)
+        prev_signal = macd.get("prev_signal_line", 0)
+        histogram = macd.get("histogram", 0)
+
+        # Detect crossover
+        bullish_cross = prev_macd <= prev_signal and macd_line > signal_line
+        bearish_cross = prev_macd >= prev_signal and macd_line < signal_line
+
+        if not bullish_cross and not bearish_cross:
+            logger.info(f"  {coin}: NO CROSSOVER — MACD={macd_line:.6f}, Signal={signal_line:.6f}")
+            return None
+
+        # MACD position relative to zero line
+        # Bullish cross should happen BELOW zero (early momentum)
+        # Bearish cross should happen ABOVE zero (early reversal)
+        if bullish_cross and macd_line > 0:
+            logger.info(f"  {coin}: BULLISH cross but ABOVE zero line — skip (late entry)")
+            return None
+        if bearish_cross and macd_line < 0:
+            logger.info(f"  {coin}: BEARISH cross but BELOW zero line — skip (late entry)")
+            return None
+
+        direction = "long" if bullish_cross else "short"
+
+        # ── Component 2: EMA 200 trend filter ──
+        ema_200 = tech_trend.get("ema_200", 0)
+        if ema_200 <= 0:
+            logger.info(f"  {coin}: NO EMA 200 data — skip")
+            return None
+
+        if direction == "long" and price <= ema_200:
+            logger.info(f"  {coin}: LONG rejected — price {price:.4f} BELOW EMA200 {ema_200:.4f}")
+            return None
+        if direction == "short" and price >= ema_200:
+            logger.info(f"  {coin}: SHORT rejected — price {price:.4f} ABOVE EMA200 {ema_200:.4f}")
+            return None
+
+        # ── Component 3: S/R confirmation ──
+        supports = tech_signal.get("support_levels", [])
+        resistances = tech_signal.get("resistance_levels", [])
+        sr_proximity = self.cfg["sr_proximity_pct"] / 100.0
+
+        sr_confirmed = False
+        nearest_sr = None
+
+        if direction == "long":
+            # Look for nearby support
+            for s in supports:
+                s_price = s.get("price", s) if isinstance(s, dict) else s
+                if abs(price - s_price) / price <= sr_proximity:
+                    sr_confirmed = True
+                    nearest_sr = s_price
+                    break
+        else:
+            # Look for nearby resistance
+            for r in resistances:
+                r_price = r.get("price", r) if isinstance(r, dict) else r
+                if abs(price - r_price) / price <= sr_proximity:
+                    sr_confirmed = True
+                    nearest_sr = r_price
+                    break
+
+        # S/R is confirmation, not hard requirement — boost confidence if present
+        base_confidence = 0.65
+        if sr_confirmed:
+            base_confidence = 0.80
+            logger.info(f"  {coin}: S/R confirmed at {nearest_sr:.4f}")
+        else:
+            logger.info(f"  {coin}: No S/R nearby (supports={len(supports)}, resistances={len(resistances)})")
+
+        if base_confidence < min_confidence:
+            logger.info(f"  {coin}: confidence {base_confidence:.2f} < min {min_confidence:.2f}")
+            return None
+
+        # ── Calculate SL/TP ──
+        atr = tech_signal.get("atr", price * 0.003)
+        atr_buffer = atr * self.cfg["atr_sl_buffer"]
+
+        if direction == "long":
+            # SL behind EMA 200 with ATR buffer
+            sl = ema_200 - atr_buffer
+            sl_distance = price - sl
+            tp = price + sl_distance * self.cfg["rr_ratio"]
+        else:
+            sl = ema_200 + atr_buffer
+            sl_distance = sl - price
+            tp = price - sl_distance * self.cfg["rr_ratio"]
+
+        # Validate R/R
+        if sl_distance <= 0:
+            logger.info(f"  {coin}: Invalid SL distance — skip")
+            return None
+
+        risk_pct = (sl_distance / price) * 100
+        if risk_pct > self.cfg["max_risk_pct"]:
+            logger.info(f"  {coin}: Risk {risk_pct:.2f}% > max {self.cfg['max_risk_pct']}% — skip")
+            return None
+
+        rr = self.cfg["rr_ratio"]
+        action = Action.OPEN_LONG if direction == "long" else Action.OPEN_SHORT
+
+        reason = (f"MACD {'bullish' if bullish_cross else 'bearish'} cross "
+                  f"{'below' if bullish_cross else 'above'} zero | "
+                  f"Price {'above' if direction == 'long' else 'below'} EMA200={ema_200:.4f} | "
+                  f"{'SR confirmed' if sr_confirmed else 'No SR'} | "
+                  f"R/R={rr:.1f}")
+
+        logger.info(f"  {coin}: >>> ENTRY {action.value} <<< conf={base_confidence:.0%} "
+                    f"SL={sl:.4f} TP={tp:.4f} R/R={rr:.1f}")
+
+        return Decision(
+            action=action,
+            symbol=symbol,
+            confidence=base_confidence,
+            trade_type=TradeType.MACD_TREND,
+            stop_loss=sl,
+            take_profit=tp,
+            reason=reason,
+            signals={
+                "macd_line": macd_line,
+                "signal_line": signal_line,
+                "histogram": histogram,
+                "ema_200": ema_200,
+                "sr_confirmed": sr_confirmed,
+                "nearest_sr": nearest_sr,
+                "atr": atr,
+            },
+        )
+
+    def _manage_position(self, symbol: str, position: dict,
+                         tech_signal: dict) -> Decision | None:
+        """Manage open position — time exits + breakeven."""
+        entry_price = position.get("entry_price", 0)
+        direction = position.get("side", position.get("direction", "long"))
+        current_price = tech_signal.get("price", entry_price)
+        age_minutes = position.get("age_minutes", 0)
+
+        if entry_price <= 0:
+            return None
+
+        if direction == "long":
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+        else:
+            pnl_pct = (entry_price - current_price) / entry_price * 100
+
+        coin = symbol.replace("/USDT:USDT", "")
+
+        # 1. Max time
+        if age_minutes > self.cfg["max_trade_minutes"]:
+            logger.info(f"  {coin}: CLOSE — max time {age_minutes:.0f}min, pnl={pnl_pct:+.2f}%")
+            return Decision(Action.CLOSE, symbol, 0.9,
+                          reason=f"max time {age_minutes:.0f}min, pnl={pnl_pct:+.2f}%")
+
+        # 2. Dead trade
+        if abs(pnl_pct) < 0.1 and age_minutes > self.cfg["dead_trade_minutes"]:
+            logger.info(f"  {coin}: CLOSE — flat {age_minutes:.0f}min")
+            return Decision(Action.CLOSE, symbol, 0.8,
+                          reason=f"dead trade {age_minutes:.0f}min")
+
+        # 3. Move SL to breakeven
+        if pnl_pct > self.cfg["breakeven_pnl_pct"] and not position.get("sl_at_breakeven"):
+            commission = entry_price * 0.0006
+            new_sl = entry_price + commission if direction == "long" else entry_price - commission
+            logger.info(f"  {coin}: UPDATE SL to breakeven, pnl={pnl_pct:+.2f}%")
+            return Decision(Action.UPDATE_SL, symbol, 0.9, stop_loss=new_sl,
+                          reason=f"SL to breakeven, pnl={pnl_pct:+.2f}%",
+                          signals={"sl_at_breakeven": True})
+
+        return None
+
+    def record_loss(self, symbol: str):
+        """Record a loss for symbol cooldown tracking."""
+        self._symbol_losses.setdefault(symbol, [])
+        self._symbol_losses[symbol].append(time.time())
+        cutoff = time.time() - 3600
+        self._symbol_losses[symbol] = [t for t in self._symbol_losses[symbol] if t > cutoff]
+
+    def _is_on_cooldown(self, symbol: str) -> bool:
+        """Check if symbol is on cooldown after recent losses."""
+        losses = self._symbol_losses.get(symbol, [])
+        cooldown = self.cfg["symbol_cooldown_minutes"] * 60
+        recent = [t for t in losses if time.time() - t < cooldown]
+        return len(recent) >= 2
